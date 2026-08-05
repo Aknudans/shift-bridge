@@ -1,0 +1,13 @@
+# Datos con informacion personal real de colaboradores - nunca subir a git
+*.xlsx
+~$*.xlsx
+
+# Capturas de depuracion (pueden mostrar datos de pantalla)
+debug_*.png
+
+# Python
+__pycache__/
+*.pyc
+
+# Configuracion local de Claude Code (especifica de esta maquina)
+.claude/
