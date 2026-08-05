@@ -503,19 +503,24 @@ hace lo esperado antes de confiar en la extracción automática.
 ### 8.4 Reglas de seguridad a respetar (no negociables)
 - El bot **nunca** debe manejar, guardar ni pedir contraseñas — siempre asume
   sesión ya iniciada manualmente por la persona.
-- Esta fase es **estrictamente de solo lectura**. No agregar código que haga
-  click en "Crear", "Guardar", "Editar" ni "Eliminar" hasta que se apruebe
-  explícitamente pasar a la Fase 2 (creación).
 - No correr múltiples instancias en paralelo con el mismo usuario (límite de
   sesión única confirmado en el sitio).
 - Si algo fallа, el script debe **loguear el error y seguir con la siguiente
   fila**, nunca detener todo el lote silenciosamente ni dejar el navegador en
   un estado inconsistente sin avisar.
 
+✅ **Fase 2 (creación/edición) aprobada explícitamente por el usuario** —
+ver sección 12. La restricción de "solo lectura" que aplicaba aquí quedó
+superada; sigue vigente todo lo demás de esta lista.
+
 ## 9. Archivos del proyecto
 
 ```
 buscar_y_comparar.py   — script principal, Fase 1 (búsqueda + comparación)
+ejecutar_bot.bat        — launcher de un click para Fase 1 (solo comparación)
+crear_o_editar.py       — script Fase 2 (creación/edición), ver sección 12
+ejecutar_crear.bat      — launcher de un click para Fase 2, dedicado y separado
+                          del anterior a propósito (repo: rama `Crear`)
 requirements.txt       — dependencias Python
 README.md              — instrucciones de uso para el usuario final (no técnico)
 CLAUDE.md              — este archivo
@@ -546,3 +551,196 @@ El resto del documento (catálogos, mapeo de campos, reglas de negocio) también
 proviene de exploración en vivo pero no fue re-verificado en esta sesión
 puntual. Ante cualquier duda, la fuente de verdad es siempre el sitio real, no
 este documento.
+
+## 12. Fase 2 — Creación y edición de colaboradores
+
+Explorado en vivo el 05/08/2026 con Claude in Chrome (rama `Crear`). Repo
+separado del flujo de Fase 1: habrá un script y un `.bat` propios
+(`crear_o_editar.py` / `ejecutar_crear.bat`), sin tocar `buscar_y_comparar.py`
+ni `ejecutar_bot.bat`, que quedan dedicados exclusivamente a comparar.
+
+### 12.1 Flujo de negocio acordado
+
+```
+Para cada colaborador del Excel:
+  1. Seleccionar el Grupo Proveedor correcto (igual que Fase 1).
+  2. Buscar el RUT en el grid.
+  3a. Si SE ENCUENTRA -> click en "editar" (lápiz):
+        - Leer los valores ACTUALES del formulario (justo antes de tocar nada).
+        - Validar el Cargo del Excel contra las opciones reales del catálogo
+          (dropdown de Categoría Trabajador). Si NO calza exacto -> se omite
+          la fila COMPLETA (no se edita ningún campo de esa persona) y se
+          reporta como error/omitido.
+        - Si el Cargo es válido: comparar cada campo (misma lógica de
+          comparar_datos) y modificar SOLO los que difieren, dejando el
+          resto intacto (nunca sobrescribir campos que ya coinciden).
+        - Guardar (#btnGuardar).
+  3b. Si NO SE ENCUENTRA -> click en "Crear" (botón abajo a la derecha de la
+      grilla):
+        - Validar el Cargo del Excel contra el catálogo real igual que en 3a
+          -> si no calza, se omite la creación completa de esa persona.
+        - Llenar el formulario vacío con TODOS los datos del Excel.
+        - Guardar (#btnGuardar).
+  4. En AMBOS casos, registrar en el reporte final qué se hizo: CREADO /
+     EDITADO (con el detalle de qué campos cambiaron) / OMITIDO (Cargo
+     inválido) / ERROR.
+```
+
+✅ **Decisión de negocio confirmada por el usuario** (no es un modo
+"dry-run" separado en dos corridas): en una sola corrida, el script debe
+**estar seguro de qué va a editar antes de tocar cualquier campo** — es
+decir, calcular el diff completo contra los valores reales leídos del
+formulario en ese momento, y solo entonces aplicar los cambios — y al
+terminar, generar un reporte de **qué se editó/creó/omitió**, análogo al
+reporte de Fase 1 pero orientado a acciones realizadas, no solo a
+detectar discrepancias.
+
+### 12.2 Vista "editar" (ícono lápiz) — campos y selectores confirmados
+
+⚠️ **No se puede pasar de "ver" a "editar" directamente en la misma fila** —
+hay que cerrar la vista abierta primero (botón `#btnCancelar`, ver sección 6
+Paso 11) y volver a hacer clic en el ícono de editar desde la fila colapsada.
+Confirmado en vivo: intentarlo sin cerrar deja la vista sin cambiar.
+
+Al hacer clic en el ícono de editar (`a[title="editar"]`, junto al de "ver"),
+los mismos campos de "Datos Trabajador" se vuelven inputs editables:
+
+```
+Nombres:            #txtNombres                 (input texto, ID ESTABLE)
+Apellido Paterno:   #txtApellidoPaterno          (input texto, ID ESTABLE)
+Apellido Materno:   #txtApellidoMaterno          (input texto, ID ESTABLE)
+Sexo:               id contiene "cbSexo"         (ASPxComboBox)
+Inicio Contrato:    #calendarioFechaInicio_txtCalendar   (ID ESTABLE)
+Fin Contrato:       #calendarioFechaTermino_txtCalendar  (ID ESTABLE)
+                    + checkbox "Indefinido" junto al campo
+AFP:                id contiene "cbAFP"          (ASPxComboBox)
+Sistema de Salud:   id contiene "cbIsapre"        (ASPxComboBox)
+Sueldo Base:        #txtSueldoBase               (input texto, ID ESTABLE)
+```
+Los inputs de texto (`txtNombres`, `txtApellidoPaterno`, `txtApellidoMaterno`,
+`txtSueldoBase`) y las fechas tienen **el mismo ID en Editar y en Crear** —
+gran ventaja, un solo bloque de código sirve para ambos flujos. Los combobox
+(Sexo/AFP/Isapre) tienen un id largo con fragmento estable (`cbSexo`, `cbAFP`,
+`cbIsapre`) pero el resto del id cambia entre "editar fila existente"
+(`..._ef0_..._cbSexo_0_VI`) y "crear nuevo" (`..._efnew_..._cbSexo_VI`) — usar
+selección por fragmento (`[id*="cbSexo"]`), nunca el id completo.
+
+Más abajo (scroll), igual que en "ver":
+```
+Proveedores:            #ASPxDropDownEdit3_I  (combo con checkboxes + botón ">" para confirmar)
+Categoría Trabajador:   dropdown con checkboxes (Cargo) — mismo mecanismo que el combo de Grupo Proveedor
+Tiendas:                dropdown con checkboxes — mismo mecanismo
+```
+🔴 **Crítico**: estos 3 dropdowns son **multi-select ACUMULATIVO** — hacer
+clic en una opción **suma** al valor actual, no lo reemplaza (confirmado en
+vivo: seleccionar una 2da opción de Categoría Trabajador dejó el input
+mostrando `"Opción A;Opción B"`, separadas por `;`). Para dejar un ÚNICO valor
+correcto hay que **desmarcar explícitamente cualquier checkbox ya marcado que
+no sea el deseado**, no alcanza con marcar el nuevo. Esto aplica tanto a
+Proveedores como a Categoría Trabajador y Tiendas.
+
+Botones al fondo del formulario de edición: `#btnCancelar` (cierra sin
+guardar, confirmado que revierte la fila a `dxgvDataRow` normal) y
+**`#btnGuardar`** (CONFIRMADO EN VIVO por inspección de DOM — nunca se hizo
+clic real en él durante la exploración, solo se leyó su id, para no modificar
+datos reales sin autorización explícita de guardar).
+
+### 12.3 Vista "Crear" (colaborador nuevo)
+
+Botón "Crear" (`text=Crear`, esquina inferior derecha de la grilla) abre una
+fila nueva arriba de la grilla, en 2 pasos:
+
+**Paso A — Tipo Código + Rut**:
+```
+Tipo Código:  dropdown, default "Cédula Chilena (CI)"
+Rut:          #txtRutVer_Raw  (input texto, ID ESTABLE)
+              + botón ">" para confirmar (mismo patrón que Proveedores)
+```
+El campo Rut valida el formato en vivo (mensaje "RUT, Correcto" en verde) y
+auto-formatea con puntos (`12345678-5` → `12.345.678-5`) — escribir sin
+puntos funciona bien, no hace falta pre-formatear desde Python.
+
+**Paso B — tras confirmar el RUT**, aparece el resto del formulario, **con
+los mismos IDs que la vista "editar"** (`#txtNombres`, `#cbSexo`, etc. — ver
+sección 12.2), todos vacíos salvo:
+- Inicio Contrato: viene pre-llenado con la fecha de HOY — hay que
+  sobrescribirlo con el valor del Excel.
+- AFP: default "Uno". Sistema de Salud: default "Sin Información". Sueldo
+  Base: default "0". Sexo: default "Masculino". Todos hay que sobrescribirlos
+  siempre, nunca asumir que el default sirve.
+
+⚠️ **Orden de dependencia confirmado**: "Categoría Trabajador" (Cargo) y
+"Tiendas" **no aparecen en el formulario hasta que se confirma un Proveedor**
+(botón ">" junto al combo Proveedores). Si el flujo intenta llenar Cargo/Tienda
+antes de confirmar Proveedor, esos campos ni existen en el DOM todavía.
+
+Botones: "Cancelar" (junto al Paso A, cierra sin guardar) y, al final del
+formulario completo, **`#btnGuardar`** (mismo id que en editar).
+
+### 12.4 Decisiones de negocio confirmadas
+
+- **Cargo inválido al editar un trabajador existente**: se omite la fila
+  COMPLETA (ningún campo de esa persona se toca), igual que la regla ya
+  definida para creación (sección 3). Se reporta como omitido/error.
+- **Flujo de una sola corrida**: no hay modo "dry-run" separado. El script
+  calcula el diff contra los valores reales del formulario antes de tocar
+  cualquier campo, aplica solo lo que difiere, y al final reporta qué se
+  editó/creó/omitió (ver sección 12.1).
+- **Multi-select (Proveedores/Cargo/Tiendas)**: por ahora se asume que cada
+  trabajador tiene exactamente UN valor por campo (igual que las columnas del
+  Excel, que traen un solo valor cada una) — el código debe desmarcar
+  cualquier checkbox previo que no sea el deseado antes de marcar el nuevo.
+  Si en el futuro se necesita soportar múltiples valores por campo, revisar
+  esta sección primero.
+- **Reseteo de vista tras guardar exitoso**: pedido explícito del usuario —
+  después de un `CREADO` o `EDITADO`, el bot navega por el menú lateral
+  (hamburguesa -> Externos -> Trabajadores, `resetear_vista_trabajadores()`
+  en `crear_o_editar.py`) en vez de solo recargar la URL, para asegurar que
+  el servidor quede en un estado limpio antes de procesar la siguiente fila.
+  Como esto navega a una página nueva, el Grupo Proveedor seleccionado se
+  pierde y se vuelve a seleccionar en la fila siguiente.
+
+### 12.5 Bugs encontrados y corregidos durante la implementación (05/08/2026)
+
+Probado en vivo con Claude in Chrome contra el RUT de prueba `20562265-9`
+(Ana Laura), **sin hacer clic real en Guardar** en ningún momento (decisión
+explícita: no modificar datos reales todavía). Se encontraron y corrigieron
+3 bugs antes de llegar a ese punto:
+
+1. **Checkbox y texto son elementos SEPARADOS.** Cada opción del checkbox
+   list de Categoría Trabajador/Tiendas/Proveedores en el formulario
+   editable NO es un único `.dxeListBoxItem` con checkbox+texto adentro —
+   son DOS elementos `.dxeListBoxItem` consecutivos: uno clase `dxeC` (solo
+   el `<input type="checkbox">`) y el siguiente clase `dxeT` (solo el
+   texto). Leerlos/clickearlos como si fueran uno solo rompía la detección
+   de qué está marcado y el click no marcaba nada. Fix: emparejar por
+   posición en `obtener_opciones_multiselect()` y `establecer_multiselect_valor_unico()`.
+
+2. **`_input_por_etiqueta()` asumía layout de tabla de 2 columnas.** Funciona
+   para "Nombres:"/"Apellido Paterno:"/etc. (etiqueta y caja en la misma fila,
+   `td` + `td`), pero "Proveedores:", "Categoría Trabajador:" y "Tiendas:"
+   tienen la etiqueta en su propia línea y la caja DEBAJO, no al lado. Fix:
+   en vez de asumir estructura de tabla, se toma el primer `input`/`select`
+   visible que aparece después de la etiqueta en el orden del documento
+   (`compareDocumentPosition`).
+
+3. **Prefijo "LOGISTICA FALABELLA/" inconsistente entre vista de solo
+   lectura y formulario editable.** En la vista "ver" (Fase 1), Proveedores
+   y Tiendas NO traen el prefijo, pero Cargo sí (documentado en sección 6,
+   Paso 10). **En el formulario de editar/crear, en cambio, los 3 SÍ traen
+   el prefijo completo** — confirmado en vivo para Proveedores y Tiendas
+   (antes se les quitaba el prefijo antes de buscarlos en el dropdown, lo
+   que hacía que nunca se encontraran). Fix: en `crear_o_editar.py`, pasar
+   siempre el valor COMPLETO del Excel (con prefijo) a
+   `establecer_multiselect_valor_unico()` para los 3 campos, sin recortar.
+
+4. **Botón de confirmar RUT en "Crear"**: id real confirmado en vivo es
+   `#btnAceptaRut` (no un patrón adivinado por XPath). El input real
+   editable del RUT es `#txtRutVer_I` — `#txtRutVer_Raw` es un input oculto
+   (`type="hidden"`) que no hay que tocar directamente.
+
+⚠️ **Sigue pendiente**: el botón `#btnGuardar` nunca se clickeó de verdad
+(decisión explícita del usuario). Antes de usar `crear_o_editar.py` contra
+datos de producción, probarlo con cuidado con 1-2 filas de prueba primero,
+observando visualmente cada paso — mismo protocolo que la sección 8, pero
+para Fase 2.
