@@ -527,6 +527,10 @@ superada; sigue vigente todo lo demás de esta lista.
 shift_common.py         — módulo compartido: conexión a Chrome, navegación,
                           búsqueda de RUT, normalización de texto y reporte.
                           NO se ejecuta solo, lo importan los dos scripts.
+campos_formulario.py    — primitivas de lectura/escritura de campos del
+                          formulario editar/crear (Fase 2): comboboxes,
+                          multi-select, cerrar formulario. Sin lógica de
+                          negocio. NO se ejecuta solo, lo importa crear_o_editar.py.
 buscar_y_comparar.py   — script principal, Fase 1 (búsqueda + comparación)
 ejecutar_bot.bat        — launcher de un click para Fase 1 (solo comparación)
 crear_o_editar.py       — script Fase 2 (creación/edición), ver sección 12
@@ -550,6 +554,11 @@ CLAUDE.md              — este archivo
   búsqueda de RUT, normalización de texto, escritura del reporte). Si se
   necesita ajustar alguna de esas piezas, hacerlo ahí — nunca duplicarla de
   nuevo en `buscar_y_comparar.py` o `crear_o_editar.py`, ambos la importan.
+- **Primitivas de campos del formulario de Fase 2 viven en
+  `campos_formulario.py`** (leer/escribir texto, combobox simple,
+  multi-select, validar Cargo, cerrar formulario) — separadas de la lógica de
+  negocio (`editar_trabajador_existente`/`crear_trabajador_nuevo` en
+  `crear_o_editar.py`, que decide QUÉ campo tocar y con qué valor).
 - **Lección general de este sitio**: si un botón/control parece no responder a
   una interacción esperada, probar con un clic real de Playwright
   (`locator.click()`) antes de asumir que el selector está mal — varios
