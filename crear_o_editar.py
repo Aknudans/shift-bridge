@@ -42,27 +42,33 @@ no modificar datos sin autorización). Validar con cuidado la primera corrida.
 """
 
 import argparse
-import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
-from playwright.sync_api import sync_playwright, Page
+from playwright.sync_api import Page
+
+from shift_common import (
+    asegurar_pagina_trabajadores,
+    buscar_rut,
+    cargar_excel,
+    conectar_a_chrome_existente,
+    escribir_reporte,
+    limpiar_filtro,
+    navegar_a_trabajadores_por_menu,
+    normalizar_texto,
+    quitar_prefijo_catalogo,
+    seleccionar_grupo_proveedor,
+)
 
 # ---------------------------------------------------------------------------
-# CONFIGURACIÓN — ajustar aquí si algo cambia en el sitio
+# CONFIGURACIÓN — selectores específicos de Fase 2 (crear/editar). Los
+# selectores compartidos con Fase 1 (conexión, navegación, filtro de RUT,
+# grupo proveedor) viven en shift_common.py — ver ese archivo para esos.
 # ---------------------------------------------------------------------------
 
-BASE_URL = "https://externoslof.shiftlabor.com/Funcionalidades/Externos/ProveedorTrabajador.aspx"
-CDP_URL = "http://localhost:9222"
-
-SELECTOR_FILTRO_RUT = "#grillaExternosProveedorTrabajadores_DXFREditorcol2_I"
 SELECTOR_BOTON_EDITAR = 'a[title="editar"]'
-SELECTOR_TABLA_GRILLA = "#grillaExternosProveedorTrabajadores_DXMainTable"
-SELECTOR_INPUT_GRUPO_PROVEEDOR = "#MJJerarquia00_I"
 SELECTOR_BOTON_CREAR_NUEVO = "text=Crear"
 # ⚠️ El input real editable es "#txtRutVer_I" — "#txtRutVer_Raw" es un input
 # oculto (type="hidden") que NO hay que tocar directamente (confirmado en vivo).
@@ -79,16 +85,6 @@ SELECTOR_BTN_CANCELAR = "#btnCancelar"
 # Fragmento estable del id del botón ">" que confirma el Proveedor elegido y
 # habilita las secciones de Categoría Trabajador (Cargo) y Tiendas.
 ID_FRAGMENTO_CONFIRMAR_PROVEEDOR = "btnCargarClientesCategoria"
-
-# Selectores del menú lateral (ver buscar_y_comparar.py / CLAUDE.md sección 6)
-# — usados para RESETEAR la vista de Trabajadores después de cada Crear/Editar
-# exitoso, por pedido explícito del usuario: en vez de solo recargar la URL,
-# se navega pasando por el menú (hamburguesa -> Externos -> Trabajadores)
-# para asegurar que el servidor quede en un estado limpio antes de la
-# siguiente fila.
-SELECTOR_BOTON_MENU = "#icono_abrir_menu"
-SELECTOR_MENU_EXTERNOS = "#mf_cab_01"
-SELECTOR_MENU_TRABAJADORES = "#mf_cab_ll_01_01"
 
 # Campos de texto simples: mismo ID en "editar" y en "Crear" (gran ventaja,
 # confirmado en vivo). Mapeo etiqueta -> id.
@@ -116,8 +112,6 @@ COLUMNAS_EXCEL_REQUERIDAS = [
     "sueldoBase", "PROVEEDOR", "CARGO", "TIENDA", "fechaContratacion", "fechaTermino",
 ]
 
-PREFIJO_CATALOGO = "LOGISTICA FALABELLA/"
-
 
 # ---------------------------------------------------------------------------
 # MODELOS DE DATOS
@@ -132,20 +126,9 @@ class ResultadoFila:
 
 
 # ---------------------------------------------------------------------------
-# UTILIDADES
+# UTILIDADES ESPECÍFICAS DE FASE 2
+# (normalizar_texto/quitar_prefijo_catalogo/cargar_excel viven en shift_common.py)
 # ---------------------------------------------------------------------------
-
-def normalizar_texto(valor: Optional[str]) -> str:
-    if valor is None:
-        return ""
-    return str(valor).strip().upper()
-
-
-def quitar_prefijo_catalogo(valor: Optional[str]) -> str:
-    texto = normalizar_texto(valor)
-    if texto.startswith(normalizar_texto(PREFIJO_CATALOGO)):
-        return texto[len(PREFIJO_CATALOGO):].strip()
-    return texto
 
 
 def formatear_fecha(valor: Optional[str]) -> str:
@@ -155,102 +138,6 @@ def formatear_fecha(valor: Optional[str]) -> str:
         return ""
     fecha = pd.to_datetime(valor)
     return fecha.strftime("%d/%m/%Y")
-
-
-def cargar_excel(path: str) -> pd.DataFrame:
-    df = pd.read_excel(path, dtype=str)
-    df.columns = [c.strip() for c in df.columns]
-
-    faltantes = [c for c in COLUMNAS_EXCEL_REQUERIDAS if c not in df.columns]
-    if faltantes:
-        print(f"ERROR: Faltan columnas obligatorias en el Excel de entrada: {faltantes}")
-        sys.exit(1)
-
-    return df
-
-
-# ---------------------------------------------------------------------------
-# NAVEGACIÓN Y BÚSQUEDA (comparte lógica con buscar_y_comparar.py)
-# ---------------------------------------------------------------------------
-
-def conectar_a_chrome_existente():
-    playwright = sync_playwright().start()
-    try:
-        browser = playwright.chromium.connect_over_cdp(CDP_URL)
-    except Exception as e:
-        print("ERROR: No se pudo conectar a Chrome en el puerto 9222.")
-        print("¿Abriste Chrome con --remote-debugging-port=9222 y dejaste esa ventana abierta?")
-        print(f"Detalle técnico: {e}")
-        sys.exit(1)
-
-    context = browser.contexts[0] if browser.contexts else browser.new_context()
-    page = context.pages[0] if context.pages else context.new_page()
-    return playwright, browser, page
-
-
-def asegurar_pagina_trabajadores(page: Page):
-    if BASE_URL not in page.url:
-        page.goto(BASE_URL)
-    page.wait_for_load_state("networkidle")
-
-
-def seleccionar_grupo_proveedor(page: Page, nombre_proveedor: str):
-    """Selecciona el grupo/proveedor correcto en el combo superior. Ver
-    CLAUDE.md sección 6 para el detalle de por qué esto está automatizado."""
-    texto_busqueda = nombre_proveedor.split("/")[-1].strip()
-
-    page.locator(SELECTOR_INPUT_GRUPO_PROVEEDOR).click(timeout=5000)
-    time.sleep(0.3)
-    opcion = page.locator(f"text={texto_busqueda}").first
-    opcion.click(timeout=5000)
-    page.wait_for_load_state("networkidle")
-    time.sleep(0.5)
-
-
-def resetear_vista_trabajadores(page: Page):
-    """Vuelve a la vista de Trabajadores navegando por el menú lateral
-    (hamburguesa -> Externos -> Trabajadores), en vez de solo recargar la
-    URL. Se llama después de cada Crear/Editar exitoso (pedido explícito del
-    usuario) para asegurar un estado de servidor limpio antes de la siguiente
-    fila, evitando arrastrar cualquier estado residual del guardado anterior.
-
-    Como esto navega a una página nueva, el Grupo Proveedor seleccionado se
-    pierde — quien llama debe volver a seleccionarlo para la siguiente fila.
-    """
-    page.locator(SELECTOR_BOTON_MENU).click(timeout=5000)
-    time.sleep(0.3)
-    page.locator(SELECTOR_MENU_EXTERNOS).click(timeout=5000)
-    time.sleep(0.3)
-    page.locator(SELECTOR_MENU_TRABAJADORES).click(timeout=5000)
-    page.wait_for_load_state("networkidle")
-    time.sleep(0.5)
-
-
-def buscar_rut(page: Page, rut: str) -> bool:
-    """Ver buscar_y_comparar.py para el detalle del fix de race condition."""
-    filtro = page.locator(SELECTOR_FILTRO_RUT)
-    filtro.click()
-    filtro.fill("")
-    filtro.fill(rut)
-    filtro.press("Enter")
-    page.wait_for_load_state("networkidle")
-    selector_resultado = f"{SELECTOR_TABLA_GRILLA} td:has-text('{rut}')"
-    try:
-        page.wait_for_selector(selector_resultado, timeout=5000)
-    except Exception:
-        pass
-    time.sleep(0.3)
-
-    return page.locator(selector_resultado).count() > 0
-
-
-def limpiar_filtro(page: Page):
-    filtro = page.locator(SELECTOR_FILTRO_RUT)
-    filtro.click()
-    filtro.fill("")
-    filtro.press("Enter")
-    page.wait_for_load_state("networkidle")
-    time.sleep(0.3)
 
 
 def cerrar_formulario(page: Page):
@@ -650,40 +537,6 @@ COLORES_ESTADO = {
 }
 
 
-def escribir_reporte(resultados: list[ResultadoFila], output_path: str):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Reporte"
-
-    encabezados = ["RUT", "Nombre (Excel)", "Estado", "Detalle"]
-    ws.append(encabezados)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-
-    for r in resultados:
-        ws.append([r.rut, r.nombre_excel, r.estado, r.detalle])
-        fill = PatternFill(start_color=COLORES_ESTADO.get(r.estado, "FFFFFF"),
-                            end_color=COLORES_ESTADO.get(r.estado, "FFFFFF"),
-                            fill_type="solid")
-        for cell in ws[ws.max_row]:
-            cell.fill = fill
-
-    for col_cells in ws.columns:
-        largo = max(len(str(c.value)) if c.value else 0 for c in col_cells)
-        ws.column_dimensions[col_cells[0].column_letter].width = min(largo + 4, 80)
-
-    try:
-        wb.save(output_path)
-    except PermissionError:
-        alterno = f"{output_path.rsplit('.', 1)[0]}_{int(time.time())}.xlsx"
-        print(f"\nADVERTENCIA: no se pudo guardar en '{output_path}' "
-              f"(¿está abierto en Excel u otro programa?). Guardando como '{alterno}' en su lugar.")
-        wb.save(alterno)
-        output_path = alterno
-
-    print(f"\nReporte guardado en: {output_path}")
-
-
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
@@ -694,7 +547,7 @@ def main():
     parser.add_argument("--output", default="reporte_crear.xlsx", help="Ruta del Excel de salida")
     args = parser.parse_args()
 
-    df = cargar_excel(args.input)
+    df = cargar_excel(args.input, COLUMNAS_EXCEL_REQUERIDAS)
     print(f"Cargados {len(df)} colaboradores desde {args.input}")
 
     playwright, browser, page = conectar_a_chrome_existente()
@@ -728,7 +581,7 @@ def main():
                 # Pedido explícito del usuario: tras un guardado exitoso,
                 # resetear la vista pasando por el menú antes de seguir, para
                 # no arrastrar ningún estado residual del guardado anterior.
-                resetear_vista_trabajadores(page)
+                navegar_a_trabajadores_por_menu(page)
                 grupo_actual = None  # se perdió al navegar, hay que reseleccionarlo
             else:
                 limpiar_filtro(page)
@@ -744,7 +597,7 @@ def main():
             except Exception:
                 pass
 
-    escribir_reporte(resultados, args.output)
+    escribir_reporte(resultados, args.output, COLORES_ESTADO)
 
     total = len(resultados)
     creados = sum(1 for r in resultados if r.estado == "CREADO")

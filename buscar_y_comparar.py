@@ -52,26 +52,30 @@ NOTA IMPORTANTE SOBRE SELECTORES:
 """
 
 import argparse
-import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
-from playwright.sync_api import sync_playwright, Page
+from playwright.sync_api import Page
+
+from shift_common import (
+    asegurar_pagina_trabajadores,
+    buscar_rut,
+    cargar_excel,
+    conectar_a_chrome_existente,
+    escribir_reporte,
+    limpiar_filtro,
+    normalizar_texto,
+    quitar_prefijo_catalogo,
+    seleccionar_grupo_proveedor,
+)
 
 # ---------------------------------------------------------------------------
-# CONFIGURACIÓN — ajustar aquí si algo cambia en el sitio
+# CONFIGURACIÓN — selectores específicos de Fase 1 (búsqueda/comparación).
+# Los selectores compartidos con Fase 2 (conexión, navegación, filtro de RUT,
+# grupo proveedor) viven en shift_common.py — ver ese archivo para esos.
 # ---------------------------------------------------------------------------
-
-BASE_URL = "https://externoslof.shiftlabor.com/Funcionalidades/Externos/ProveedorTrabajador.aspx"
-CDP_URL = "http://localhost:9222"  # puerto de depuración remota de Chrome
-
-# ID del input de filtro "Código" (RUT) en el grid. Ver comentario en el
-# encabezado: extraído en vivo del DOM (grillaExternosProveedorTrabajadores_DXFREditorcol2_I)
-SELECTOR_FILTRO_RUT = "#grillaExternosProveedorTrabajadores_DXFREditorcol2_I"
 
 # Ícono "ver" (lupa) de la fila de resultado filtrado. CONFIRMADO EN VIVO
 # 05/08/2026: el ID completo real es
@@ -79,28 +83,6 @@ SELECTOR_FILTRO_RUT = "#grillaExternosProveedorTrabajadores_DXFREditorcol2_I"
 # pero es más robusto seleccionar por atributo (inmune a cambios de índice/prefijo).
 # Como filtramos por RUT único, siempre debería haber como máximo 1 resultado.
 SELECTOR_BOTON_VER = 'a[title="ver"]'
-
-# Tabla principal de la grilla. CONFIRMADO EN VIVO 05/08/2026: NO usar
-# "tr.dxgvDataRow" para detectar filas — si una fila quedó previamente
-# "expandida" (vista de detalle abierta) en la misma sesión de navegador, su
-# clase cambia a "dxgvEditFormDisplayRow" y ese selector deja de encontrarla,
-# reportando "no encontrado" con un RUT que sí existe. Mejor buscar el RUT
-# directamente en las celdas, sin depender de la clase de la fila.
-SELECTOR_TABLA_GRILLA = "#grillaExternosProveedorTrabajadores_DXMainTable"
-
-# Input del combo "Grupo Proveedor" (DevExpress ASPxComboBox). CONFIRMADO EN VIVO
-# que requiere clic real de mouse para abrir (no responde a .click() vía JS).
-SELECTOR_INPUT_GRUPO_PROVEEDOR = "#MJJerarquia00_I"
-
-# Botón/link para expandir la sección "Externos" del menú lateral.
-# ⚠️ También requiere clic real de mouse (no .click() vía JS).
-SELECTOR_MENU_EXTERNOS = "#mf_cab_01"
-
-# Link "Trabajadores" dentro de la sección Externos ya expandida.
-SELECTOR_MENU_TRABAJADORES = "#mf_cab_ll_01_01"
-
-# Botón de menú hamburguesa (abre el panel lateral completo).
-SELECTOR_BOTON_MENU = "#icono_abrir_menu"
 
 # Mapeo de las etiquetas que aparecen en la vista de detalle (modo "ver") a
 # nuestros nombres de campo internos. Deben calzar EXACTO con el texto que
@@ -124,12 +106,6 @@ ID_FRAGMENTO_PROVEEDORES = "lstProveedores"
 ID_FRAGMENTO_CARGO = "lstVerClientes"
 ID_FRAGMENTO_TIENDA = "listBoxTienda"
 
-# El Excel suele traer estos 3 campos con el prefijo "LOGISTICA FALABELLA/"
-# (mismo formato de catálogo), pero el sitio no siempre lo muestra así en la
-# vista de detalle (Proveedores y Tiendas NO lo traen, Cargo SÍ). Se quita de
-# ambos lados antes de comparar para no generar falsos positivos.
-PREFIJO_CATALOGO = "LOGISTICA FALABELLA/"
-
 COLUMNAS_EXCEL_REQUERIDAS = [
     "RUT", "NOMBRES", "apellidoPaterno", "apellidoMaterno", "SEXO", "AFP", "ISAPRE", "PROVEEDOR",
     "sueldoBase", "CARGO", "TIENDA",
@@ -150,138 +126,9 @@ class ResultadoFila:
 
 
 # ---------------------------------------------------------------------------
-# UTILIDADES
+# LÓGICA DE AUTOMATIZACIÓN ESPECÍFICA DE FASE 1
+# (conexión, navegación y búsqueda de RUT compartidas viven en shift_common.py)
 # ---------------------------------------------------------------------------
-
-def normalizar_texto(valor: Optional[str]) -> str:
-    """Normaliza texto para comparar sin sensibilidad a mayúsculas/espacios/tildes básicas."""
-    if valor is None:
-        return ""
-    return str(valor).strip().upper()
-
-
-def quitar_prefijo_catalogo(valor: Optional[str]) -> str:
-    """Quita el prefijo 'LOGISTICA FALABELLA/' (si está) antes de comparar Proveedor/Cargo/Tienda."""
-    texto = normalizar_texto(valor)
-    if texto.startswith(normalizar_texto(PREFIJO_CATALOGO)):
-        return texto[len(PREFIJO_CATALOGO):].strip()
-    return texto
-
-
-def cargar_excel(path: str) -> pd.DataFrame:
-    df = pd.read_excel(path, dtype=str)
-    df.columns = [c.strip() for c in df.columns]
-
-    faltantes = [c for c in COLUMNAS_EXCEL_REQUERIDAS if c not in df.columns]
-    if faltantes:
-        print(f"ERROR: Faltan columnas obligatorias en el Excel de entrada: {faltantes}")
-        sys.exit(1)
-
-    return df
-
-
-# ---------------------------------------------------------------------------
-# LÓGICA DE AUTOMATIZACIÓN
-# ---------------------------------------------------------------------------
-
-def conectar_a_chrome_existente():
-    """
-    Se conecta a una ventana de Chrome YA ABIERTA (con --remote-debugging-port=9222)
-    donde el usuario ya inició sesión manualmente en ShiftLaboral. No abre una
-    ventana nueva ni maneja credenciales.
-    """
-    playwright = sync_playwright().start()
-    try:
-        browser = playwright.chromium.connect_over_cdp(CDP_URL)
-    except Exception as e:
-        print("ERROR: No se pudo conectar a Chrome en el puerto 9222.")
-        print("¿Abriste Chrome con --remote-debugging-port=9222 y dejaste esa ventana abierta?")
-        print(f"Detalle técnico: {e}")
-        sys.exit(1)
-
-    context = browser.contexts[0] if browser.contexts else browser.new_context()
-    page = context.pages[0] if context.pages else context.new_page()
-    return playwright, browser, page
-
-
-def navegar_a_trabajadores_por_menu(page: Page):
-    """
-    Sigue el flujo de navegación exacto verificado en vivo: menú -> Externos ->
-    Trabajadores. Útil si se prefiere no navegar directo por URL (ej. para
-    validar que el menú sigue funcionando igual tras un cambio de plataforma).
-    Usa .click() de Playwright (clic real), NO page.evaluate — confirmado que
-    los pasos "Externos" y el combo de proveedor no responden a click programático.
-    """
-    page.goto("https://externoslof.shiftlabor.com/Default.aspx")
-    page.wait_for_load_state("networkidle")
-
-    page.locator(SELECTOR_BOTON_MENU).click()
-    time.sleep(0.3)
-
-    page.locator(SELECTOR_MENU_EXTERNOS).click()  # requiere clic real, confirmado
-    time.sleep(0.3)
-
-    page.locator(SELECTOR_MENU_TRABAJADORES).click()
-    page.wait_for_load_state("networkidle")
-
-
-def asegurar_pagina_trabajadores(page: Page):
-    if BASE_URL not in page.url:
-        page.goto(BASE_URL)
-    page.wait_for_load_state("networkidle")
-
-
-def seleccionar_grupo_proveedor(page: Page, nombre_proveedor: str):
-    """
-    Selecciona automáticamente el proveedor/grupo correcto en el combo superior
-    izquierdo (#MJJerarquia00_I) antes de buscar, ya que el listado de
-    trabajadores solo muestra los del grupo seleccionado.
-
-    CONFIRMADO EN VIVO: el combo requiere clic real de mouse para abrir (no
-    responde a .click() programático vía JS) — locator.click() de Playwright
-    simula un clic real y sí funciona.
-
-    La columna PROVEEDOR del Excel puede venir con un prefijo tipo
-    "LOGISTICA FALABELLA/..." (mismo formato usado en los catálogos de
-    Cargo/Tienda), pero el dropdown del sitio solo muestra el texto después de
-    esa barra (ej. "Grupo Colchagua Empresa de Servicios Transitorios S.A.").
-    Se usa solo esa última parte para buscar la opción visible.
-    """
-    texto_busqueda = nombre_proveedor.split("/")[-1].strip()
-
-    page.locator(SELECTOR_INPUT_GRUPO_PROVEEDOR).click(timeout=5000)
-    time.sleep(0.3)
-    opcion = page.locator(f"text={texto_busqueda}").first
-    opcion.click(timeout=5000)
-    page.wait_for_load_state("networkidle")
-    time.sleep(0.5)
-
-
-def buscar_rut(page: Page, rut: str) -> bool:
-    """Escribe el RUT en el filtro de la grilla y presiona Enter. Devuelve True si hay resultados.
-
-    CONFIRMADO EN VIVO 05/08/2026: `networkidle` se cumple ANTES de que el
-    callback AJAX de DevExpress termine de renderizar la fila filtrada — un
-    RUT real llegó a reportarse como "no encontrado" porque se leyó el grid
-    demasiado pronto. Se agrega una espera explícita a que aparezca el RUT en
-    una celda de la grilla (o se agote el timeout, señal de que de verdad no
-    hay resultados) en vez de confiar solo en un sleep fijo.
-    """
-    filtro = page.locator(SELECTOR_FILTRO_RUT)
-    filtro.click()
-    filtro.fill("")
-    filtro.fill(rut)
-    filtro.press("Enter")
-    page.wait_for_load_state("networkidle")
-    selector_resultado = f"{SELECTOR_TABLA_GRILLA} td:has-text('{rut}')"
-    try:
-        page.wait_for_selector(selector_resultado, timeout=5000)
-    except Exception:
-        pass
-    time.sleep(0.3)
-
-    return page.locator(selector_resultado).count() > 0
-
 
 def extraer_datos_detalle(page: Page) -> dict:
     """
@@ -388,16 +235,6 @@ def extraer_lista_valores(page: Page, id_fragmento: str) -> Optional[str]:
     return ", ".join(valores) if valores else None
 
 
-def limpiar_filtro(page: Page):
-    """Limpia el filtro de RUT para dejar la grilla lista para la siguiente búsqueda."""
-    filtro = page.locator(SELECTOR_FILTRO_RUT)
-    filtro.click()
-    filtro.fill("")
-    filtro.press("Enter")
-    page.wait_for_load_state("networkidle")
-    time.sleep(0.3)
-
-
 def comparar_datos(fila_excel: pd.Series, datos_sistema: dict) -> tuple[str, str]:
     """Compara los datos del Excel contra lo extraído del sistema. Devuelve (estado, detalle)."""
     comparaciones = [
@@ -436,40 +273,6 @@ COLORES_ESTADO = {
 }
 
 
-def escribir_reporte(resultados: list[ResultadoFila], output_path: str):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Reporte"
-
-    encabezados = ["RUT", "Nombre (Excel)", "Estado", "Detalle"]
-    ws.append(encabezados)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-
-    for r in resultados:
-        ws.append([r.rut, r.nombre_excel, r.estado, r.detalle])
-        fill = PatternFill(start_color=COLORES_ESTADO.get(r.estado, "FFFFFF"),
-                            end_color=COLORES_ESTADO.get(r.estado, "FFFFFF"),
-                            fill_type="solid")
-        for cell in ws[ws.max_row]:
-            cell.fill = fill
-
-    for col_cells in ws.columns:
-        largo = max(len(str(c.value)) if c.value else 0 for c in col_cells)
-        ws.column_dimensions[col_cells[0].column_letter].width = min(largo + 4, 80)
-
-    try:
-        wb.save(output_path)
-    except PermissionError:
-        alterno = f"{output_path.rsplit('.', 1)[0]}_{int(time.time())}.xlsx"
-        print(f"\nADVERTENCIA: no se pudo guardar en '{output_path}' "
-              f"(¿está abierto en Excel u otro programa?). Guardando como '{alterno}' en su lugar.")
-        wb.save(alterno)
-        output_path = alterno
-
-    print(f"\nReporte guardado en: {output_path}")
-
-
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
@@ -480,7 +283,7 @@ def main():
     parser.add_argument("--output", default="reporte.xlsx", help="Ruta del Excel de salida")
     args = parser.parse_args()
 
-    df = cargar_excel(args.input)
+    df = cargar_excel(args.input, COLUMNAS_EXCEL_REQUERIDAS)
     print(f"Cargados {len(df)} colaboradores desde {args.input}")
 
     playwright, browser, page = conectar_a_chrome_existente()
@@ -529,7 +332,7 @@ def main():
             except Exception:
                 pass
 
-    escribir_reporte(resultados, args.output)
+    escribir_reporte(resultados, args.output, COLORES_ESTADO)
 
     # Resumen en consola
     total = len(resultados)

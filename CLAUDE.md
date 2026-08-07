@@ -25,16 +25,24 @@ para que inicies sesión manualmente la primera vez, pide el Excel de entrada
 python buscar_y_comparar.py --input colaboradores.xlsx --output reporte.xlsx
 ```
 
-No hay tests, linter ni build configurados — es un script autocontenido. La
-única forma de "probar" un cambio es correrlo contra el sitio real (idealmente
-con pausas visibles, ver sección 8.2) con un Excel de pocas filas.
+No hay tests, linter ni build configurados — son scripts autocontenidos (más
+un módulo de soporte compartido). La única forma de "probar" un cambio es
+correrlo contra el sitio real (idealmente con pausas visibles, ver sección
+8.2) con un Excel de pocas filas.
 
-**Arquitectura**: todo vive en `buscar_y_comparar.py`, sin módulos separados.
+**Arquitectura**: `shift_common.py` concentra lo compartido entre
+`buscar_y_comparar.py` (Fase 1) y `crear_o_editar.py` (Fase 2) — conexión a
+Chrome, navegación por menú, selección de Grupo Proveedor, búsqueda de RUT,
+normalización de texto y escritura del reporte Excel. No se ejecuta solo, los
+dos scripts principales lo importan. Esto se extrajo para no duplicar código
+entre ambas fases (antes cada script tenía su propia copia idéntica de estas
+funciones).
 - Se conecta a una instancia de Chrome ya corriendo vía Playwright
   `connect_over_cdp` (puerto 9222) — nunca lanza su propio navegador ni maneja
-  login/contraseñas (`conectar_a_chrome_existente`).
-- Bloque `CONFIGURACIÓN` al inicio del archivo: selectores DOM y constantes de
-  negocio centralizados ahí (sincronizado con sección 6/7 de este archivo).
+  login/contraseñas (`conectar_a_chrome_existente`, en `shift_common.py`).
+- Bloque `CONFIGURACIÓN` al inicio de cada script: selectores DOM y constantes
+  de negocio *específicos de esa fase* (los compartidos están en
+  `shift_common.py`), sincronizado con sección 6/7/12 de este archivo.
 - Flujo secuencial por fila del Excel (sin paralelismo, por el límite de sesión
   única del sitio): **selección automática del grupo/proveedor**
   (`seleccionar_grupo_proveedor`, ver sección 6) → filtrar por RUT → si existe,
@@ -516,6 +524,9 @@ superada; sigue vigente todo lo demás de esta lista.
 ## 9. Archivos del proyecto
 
 ```
+shift_common.py         — módulo compartido: conexión a Chrome, navegación,
+                          búsqueda de RUT, normalización de texto y reporte.
+                          NO se ejecuta solo, lo importan los dos scripts.
 buscar_y_comparar.py   — script principal, Fase 1 (búsqueda + comparación)
 ejecutar_bot.bat        — launcher de un click para Fase 1 (solo comparación)
 crear_o_editar.py       — script Fase 2 (creación/edición), ver sección 12
@@ -534,6 +545,11 @@ CLAUDE.md              — este archivo
   `CONFIGURACIÓN`, para poder ajustarlos rápido si el sitio cambia.
 - Cualquier selector nuevo que se descubra/confirme debe documentarse en este
   archivo (sección 6/7), no solo dejarse en el código.
+- **Código compartido entre Fase 1 y Fase 2 vive en `shift_common.py`**
+  (conexión a Chrome, navegación por menú, selección de Grupo Proveedor,
+  búsqueda de RUT, normalización de texto, escritura del reporte). Si se
+  necesita ajustar alguna de esas piezas, hacerlo ahí — nunca duplicarla de
+  nuevo en `buscar_y_comparar.py` o `crear_o_editar.py`, ambos la importan.
 - **Lección general de este sitio**: si un botón/control parece no responder a
   una interacción esperada, probar con un clic real de Playwright
   (`locator.click()`) antes de asumir que el selector está mal — varios
