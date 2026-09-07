@@ -23,7 +23,10 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 BASE_URL = "https://externoslof.shiftlabor.com/Funcionalidades/Externos/ProveedorTrabajador.aspx"
-CDP_URL = "http://localhost:9222"  # puerto de depuración remota de Chrome
+# Puerto de depuración remota de Chrome. Se usa 127.0.0.1 (NO "localhost")
+# porque en Windows "localhost" suele resolver primero a ::1 (IPv6) y Chrome
+# escucha solo en IPv4 -> "connect ECONNREFUSED ::1:9222".
+CDP_URL = "http://127.0.0.1:9222"
 
 SELECTOR_FILTRO_RUT = "#grillaExternosProveedorTrabajadores_DXFREditorcol2_I"
 

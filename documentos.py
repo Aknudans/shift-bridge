@@ -292,18 +292,58 @@ SEL_CM_CANCELAR = "#btnCancelarModalCargaMasivaDocumentos_2"
 
 
 def _norm(s: str) -> str:
-    """Normaliza para comparar: mayúsculas, sin tildes, espacios colapsados."""
+    """Normaliza para comparar SIN sensibilidad a: mayúsculas/minúsculas,
+    tildes/acentos, ni al separador usado (espacio, `-`, `_`, `.` o `,` son
+    equivalentes). Colapsa espacios repetidos. Se usa para calzar:
+      - nombre de subcarpeta  <-> nombre del colaborador (Excel)
+      - nombre de archivo      <-> tipo del catálogo de documentos
+    Así 'Adán_León', 'adan-leon' y 'ADAN LEON' son lo mismo."""
     s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    for ch in ("_", "-", ".", ","):
+        s = s.replace(ch, " ")
     return " ".join(s.upper().split())
+
+
+# Mapeo nombre de archivo real -> tipo del catálogo. Los archivos que entregan
+# NO se llaman como el tipo exacto (usan abreviaturas / otra redacción), así que
+# se busca por patrón sobre el nombre normalizado (`_norm`). Se evalúa EN ORDEN,
+# gana el primero que matchee. Confirmado con el usuario 07/09/2026 sobre el
+# set estándar de ingreso (carpeta "Adan_Leon", 8 documentos).
+import re as _re
+
+_MAPEO_NOMBRE_TIPO = [
+    (_re.compile(r"\bRIOHS\b"),                     "TC Reglamento Interno RIOHS mandante"),
+    (_re.compile(r"\bIRL\b|EX ?ODI"),               "Registro de Capacitación IRL (Ex Odi) Mandante"),
+    (_re.compile(r"CONTACTO (DE|EN CASO)"),         "Contacto en caso de Emergencia"),
+    (_re.compile(r"MARCAJE BIOMETRICO|MARCA EN BIOMETRICO|TOMA DE CONOCIMIENTO MARCA"),
+     "Toma de conocimiento marca en biometrico (EST)"),
+    (_re.compile(r"ENTREGA .*EPP|EPP .*ENTREGA"),   "Registro Entrega EPP"),
+    (_re.compile(r"USO EPP"),                       "Registro de Capacitación Uso EPP"),
+    (_re.compile(r"^C\s*I\b|CEDULA|CARNET"),        "Cédula de Identidad"),
+    (_re.compile(r"^CD\b|CONTRATO PUESTA A DISPOSICION|CONTRATO DE DISPOSICION|\bCPD\b"),
+     "Contrato puesta a disposición"),
+    (_re.compile(r"CONTRATO DE TRABAJO"),           "Contrato de Trabajo"),
+    (_re.compile(r"FINIQUITO"),                     "Finiquito de Trabajo"),
+    (_re.compile(r"\bVISA\b|\bATT\b"),              "Visa de trabajo o ATT"),
+    (_re.compile(r"ANEXO.*PERSONAL EST"),           "Anexos de contrato personal EST"),
+    (_re.compile(r"ANEXO DE CONTRATO|ANEXOS DE CONTRATO"), "Anexos de Contrato"),
+    (_re.compile(r"COMPROBANTE.*ENTREVISTA"),       "Comprobante de Entrevista del personal EST y OUT"),
+    (_re.compile(r"LIQUIDACION"),                   "Liquidaciones de Sueldo"),
+]
 
 
 def tipo_desde_nombre_archivo(nombre_archivo: str) -> Optional[str]:
     """Del nombre del archivo (sin extensión) deduce el tipo del catálogo.
+    1) coincidencia exacta con un tipo del catálogo, si no
+    2) patrón de `_MAPEO_NOMBRE_TIPO`.
     Devuelve el tipo EXACTO del catálogo (sin prefijo) o None si no calza."""
     stem = os.path.splitext(os.path.basename(nombre_archivo))[0]
     objetivo = _norm(stem)
     for tipo in CATALOGO_TIPOS_DOCUMENTO:
         if _norm(tipo) == objetivo:
+            return tipo
+    for rx, tipo in _MAPEO_NOMBRE_TIPO:
+        if rx.search(objetivo):
             return tipo
     return None
 
@@ -344,7 +384,7 @@ def _seleccionar_tipo_en_combo(page: Page, indice: int, tipo_sin_prefijo: str) -
             const cbo = document.getElementById('cboTipoDocumentos_' + args.idx);
             if (!cbo) return null;
             const norm = s => (s || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '')
-                .toUpperCase().replace(/\\s+/g, ' ').trim();
+                .toUpperCase().replace(/[_\\-.,]/g, ' ').replace(/\\s+/g, ' ').trim();
             const objetivo = norm(args.tipo);
             for (const o of cbo.options) {
                 let t = norm(o.textContent);
@@ -391,20 +431,52 @@ def _set_periodo(page: Page, indice: int, valor_ddmmaaaa: str,
     )
 
 
+_MSG_CAMPOS_VACIOS = "Debe completar los campos vac"
+
+
+def _guardar_carga_masiva(page: Page) -> bool:
+    """Clic en Guardar de la carga masiva + acepta el popup de éxito.
+    Devuelve False si el sitio muestra "Debe completar los campos vacíos"
+    (validación fallida, el panel sigue abierto)."""
+    page.locator(SEL_CM_GUARDAR).first.click(timeout=8000)
+    page.wait_for_load_state("networkidle")
+    time.sleep(1.5)
+    if _MSG_CAMPOS_VACIOS in page.inner_text("body"):
+        return False
+    for sel in ("#btnExitoAceptar_grillaExternosDocumentosTrabajador_2",
+                "#btnExitoAceptar_grillaExternosDocumentosTrabajador"):
+        try:
+            if page.locator(sel).is_visible(timeout=2500):
+                page.locator(sel).click(timeout=3000)
+                break
+        except Exception:
+            pass
+    time.sleep(1.0)
+    return True
+
+
 def subir_documentos_trabajador(
     page: Page, rut: str, grupo_proveedor: str,
-    items, valor_ddmmaaaa: str, vencimiento_ddmmaaaa: str = "", guardar: bool = True,
+    items, periodo_ddmmaaaa: str, vencimiento_ddmmaaaa: str = "",
+    guardar: bool = True, dejar_periodo_vacio: bool = True,
 ):
     """Sube `items` ([{ruta, nombre, tipo}]) al trabajador `rut` vía la carga
-    masiva. `valor_ddmmaaaa` es el Período de TODOS. `vencimiento_ddmmaaaa`
-    es la Fecha de Vencimiento de TODOS (el sitio la exige aunque se desmarque
-    la casilla; si viene vacía se usa el mismo Período).
+    masiva.
+
+    - `periodo_ddmmaaaa`: fecha para el campo "Período". Los usuarios reales lo
+      dejan VACÍO en la carga masiva, así que por defecto
+      (`dejar_periodo_vacio=True`) NO se llena; solo se completa si el sitio
+      rechaza el Guardar con "Debe completar los campos vacíos" (fallback
+      auto — comportamiento inferido, sin verificar en vivo que el sitio
+      acepte Período vacío).
+    - `vencimiento_ddmmaaaa`: "Fecha de vencimiento". El sitio SÍ la exige
+      (probado); si viene vacía se usa `periodo_ddmmaaaa`.
 
     guardar=False -> llena el formulario pero hace Cancelar (modo prueba).
 
     Devuelve (accion, subidos, errores):
-      accion  = "subido" | "simulado" | "sin_rut" | "sin_items"
-      subidos = [tipo, ...] cargados ; errores = [descripción, ...]
+      accion = "subido" | "subido_con_periodo" | "simulado" | "sin_rut" |
+               "sin_items" | "rechazado"
     """
     if not items:
         return ("sin_items", [], [])
@@ -429,11 +501,11 @@ def subir_documentos_trabajador(
             page.fill(f"#nombre_documento_masivo_{n}", it["nombre"], timeout=4000)
         except Exception:
             errores.append(f"{it['nombre']}: no se pudo escribir el Nombre")
-        _set_periodo(page, n, valor_ddmmaaaa, campo="calendario_documento_masivo")
-        # La "Fecha de vencimiento" es OBLIGATORIA en este form aunque se
-        # desmarque la casilla (probado: desmarcar / ComplentarInfo no la
-        # libera). Se llena con `vencimiento_ddmmaaaa` (o el mismo Período).
-        _set_periodo(page, n, vencimiento_ddmmaaaa or valor_ddmmaaaa,
+        if not dejar_periodo_vacio:
+            _set_periodo(page, n, periodo_ddmmaaaa, campo="calendario_documento_masivo")
+        # La "Fecha de vencimiento" es OBLIGATORIA (probado: desmarcar la
+        # casilla / ComplentarInfo NO la libera).
+        _set_periodo(page, n, vencimiento_ddmmaaaa or periodo_ddmmaaaa,
                      campo="calendario_fecha_vencimiento_documento_masivo")
         if _seleccionar_tipo_en_combo(page, n, it["tipo"]):
             subidos.append(it["tipo"])
@@ -449,17 +521,27 @@ def subir_documentos_trabajador(
         page.wait_for_load_state("networkidle")
         return ("simulado", subidos, errores)
 
-    page.locator(SEL_CM_GUARDAR).first.click(timeout=8000)
-    page.wait_for_load_state("networkidle")
-    for sel in ("#btnExitoAceptar_grillaExternosDocumentosTrabajador_2",
-                "#btnExitoAceptar_grillaExternosDocumentosTrabajador"):
-        try:
-            if page.locator(sel).is_visible(timeout=2500):
-                page.locator(sel).click(timeout=3000)
-                break
-        except Exception:
-            pass
-    time.sleep(1.5)
+    accion = "subido"
+    if not _guardar_carga_masiva(page):
+        # El sitio pidió completar campos. Si habíamos dejado el Período
+        # vacío, lo llenamos ahora (con `periodo_ddmmaaaa`) y reintentamos.
+        if dejar_periodo_vacio and periodo_ddmmaaaa:
+            for n in range(len(items)):
+                _set_periodo(page, n, periodo_ddmmaaaa, campo="calendario_documento_masivo")
+            if _guardar_carga_masiva(page):
+                accion = "subido_con_periodo"
+            else:
+                errores.append("el sitio rechazó el Guardar aun con Período completo")
+                accion = "rechazado"
+        else:
+            errores.append("el sitio rechazó el Guardar ('Debe completar los campos vacíos')")
+            accion = "rechazado"
+        if accion == "rechazado":
+            try:
+                page.locator(SEL_CM_CANCELAR).first.click(timeout=5000)
+            except Exception:
+                pass
+
     page.goto(BASE_URL)
     page.wait_for_load_state("networkidle")
-    return ("subido", subidos, errores)
+    return (accion, subidos, errores)

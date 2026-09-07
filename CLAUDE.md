@@ -551,7 +551,18 @@ crear_o_editar.py       — script Fase 2 (creación/edición), ver sección 12.
                           Acepta --no-guardar: llena el formulario pero NO
                           hace clic en Guardar (modo prueba, ver 12.6).
 ejecutar_crear.bat      — launcher de un click para Fase 2, dedicado y separado
-                          del anterior a propósito (repo: rama `Crear`)
+                          del anterior a propósito (repo: rama `Crear`).
+                          Corre crear_o_editar.py SIN flags (Guardar real, sin
+                          limpiar ni subir docs).
+abrir_chrome.bat        — SOLO abre el Chrome de depuración (puerto 9222,
+                          perfil separado) y pausa para el login. No corre
+                          ningún script. Usarlo antes de ejecutar
+                          "python crear_o_editar.py ..." a mano con
+                          --limpiar-documentos / --subir-documentos / --no-guardar.
+documentos.py           — módulo Fase 2 opcional: limpieza (--limpiar-documentos)
+                          y carga masiva (--subir-documentos) de documentos del
+                          trabajador. Ver secciones 12.8 y 12.9. NO se ejecuta
+                          solo, lo importa crear_o_editar.py.
 requirements.txt       — dependencias Python
 README.md              — instrucciones de uso para el usuario final (no técnico)
 CLAUDE.md              — este archivo
@@ -1018,31 +1029,49 @@ página nueva — la URL sigue siendo `DocumentosTrabajador.aspx`.
 **IMPLEMENTADO Y VALIDADO EN VIVO (07/09/2026)** — flag `--subir-documentos
 CARPETA` en `crear_o_editar.py`, funciones en `documentos.py`:
 
-- **Estructura esperada** (decisión del usuario): `CARPETA/` con una subcarpeta
-  por persona **nombrada por el nombre** (ej. `PABLO IGNACIO ALFARO`), y adentro
-  los archivos **nombrados EXACTAMENTE como el tipo del catálogo** (ej.
-  `Contrato de Trabajo.pdf`, `Cédula de Identidad.png`). Extensiones:
-  `.pdf .docx .xlsx .jpg .jpeg .png`.
-- **Carpeta → RUT** (`_buscar_carpeta_persona` en `crear_o_editar.py`): calce por
-  conjunto de palabras normalizadas (mayúsculas, sin tildes, sin orden) —
-  la carpeta calza si sus tokens (≥2) son subconjunto de
-  `nombre+apellidoPaterno+apellidoMaterno` del Excel. Sin carpeta / ambigua →
-  se reporta y no se sube nada de esa persona.
-- **Archivo → Tipo** (`tipo_desde_nombre_archivo`): el nombre del archivo sin
-  extensión, normalizado, tiene que ser IGUAL a uno de los 16 tipos del
-  catálogo (`CATALOGO_TIPOS_DOCUMENTO`, sin el prefijo `LOGISTICA FALABELLA/`).
-  Si no calza → ese archivo se omite y se reporta (no frena al resto).
-- **Período** = `fechaContratacion` del Excel. **Fecha de vencimiento** =
-  `fechaTermino` del Excel.
+- **Estructura esperada** (carpeta real `Ingresos Lunes 07-09-2026/`, formato
+  `Nombre_Apellido` por subcarpeta). Los archivos NO se llaman como el tipo
+  del catálogo: usan abreviaturas (`C.I …`, `CD FALABELLA RETAIL`, `MARCAJE
+  BIOMETRICO`, `irl …`, `riohs …`, `PROCEDIMIENTO USO EPP`, `Registro de
+  entrega de EPP …`). Extensiones: `.pdf .docx .xlsx .jpg .jpeg .png`.
+- **`_norm()`**: normaliza para calzar SIN sensibilidad a mayúsculas, tildes,
+  ni al separador (` `, `-`, `_`, `.`, `,` son equivalentes). Se usa para
+  carpeta↔persona y archivo↔tipo.
+- **Carpeta → RUT** (`_buscar_carpeta_persona` en `crear_o_editar.py`): calce
+  por conjunto de palabras `_norm` — la carpeta calza si sus tokens (≥2) son
+  subconjunto de `nombre+apellidoPaterno+apellidoMaterno` del Excel. `Adan_Leon`
+  → "ADAN LEON" ⊆ "ADAN IGNACIO LEON BRAVO". Sin carpeta / ambigua → se reporta.
+- **Archivo → Tipo** (`tipo_desde_nombre_archivo`): 1) coincidencia exacta con
+  un tipo del catálogo (`CATALOGO_TIPOS_DOCUMENTO`, 16 tipos), si no 2) tabla
+  `_MAPEO_NOMBRE_TIPO` (lista de regex → tipo, evaluada en orden). Cubre el set
+  estándar de ingreso confirmado por el usuario (07/09/2026, carpeta
+  `Adan_Leon`, 8 documentos, 0 omitidos):
+  | patrón en el nombre | tipo |
+  |---|---|
+  | `RIOHS` | TC Reglamento Interno RIOHS mandante |
+  | `IRL` / `EX ODI` | Registro de Capacitación IRL (Ex Odi) Mandante |
+  | `CONTACTO DE/EN CASO` | Contacto en caso de Emergencia |
+  | `MARCAJE BIOMETRICO` | Toma de conocimiento marca en biometrico (EST) |
+  | `ENTREGA … EPP` | Registro Entrega EPP |
+  | `USO EPP` | Registro de Capacitación Uso EPP |
+  | `^C I` / `CEDULA` / `CARNET` | Cédula de Identidad |
+  | `^CD` / `CPD` / `CONTRATO PUESTA A DISPOSICION` | Contrato puesta a disposición |
+  Archivo que no calce → se omite y se reporta (no frena al resto).
 - Corre para filas con estado `CREADO`/`EDITADO`/`SIN_CAMBIOS`. Con
   `--no-guardar` llena el form pero hace Cancelar.
 
 🔴 **Detalles que costaron (todos en `documentos.py`)**:
-- La **"Fecha de vencimiento" es OBLIGATORIA** aunque la casilla
-  `#chk_fecha_vencimiento_documento_masivo_{N}` venga marcada y se intente
-  desmarcar (probado: desmarcar por JS + `change` + llamar `ComplentarInfo(N)`
-  NO libera el campo — queda `input-error` y "Debe completar los campos
-  vacíos"). Solución: **llenarla siempre** (con `fechaTermino`).
+- **Período**: los usuarios reales lo dejan VACÍO en la carga masiva. Por eso
+  `dejar_periodo_vacio=True` (default) → el bot NO lo llena. **NO verificado en
+  vivo** que el sitio acepte Período vacío (a fecha 07/09/2026 no había sesión
+  para probar) → fallback: si al Guardar aparece "Debe completar los campos
+  vacíos", el bot llena el Período (con `fechaContratacion`) y reintenta una
+  vez. Reporte: `subido` (vacío funcionó) vs `subido_con_periodo` (hubo que
+  llenarlo) vs `rechazado`.
+- La **"Fecha de vencimiento" SÍ es OBLIGATORIA** — desmarcar la casilla
+  `#chk_fecha_vencimiento_documento_masivo_{N}` por JS + `change` +
+  `ComplentarInfo(N)` NO la libera (queda `input-error`). Se llena SIEMPRE con
+  `fechaTermino` (o `fechaContratacion` si no hay).
 - **Período** y **Fecha vencimiento** son inputs datepicker de jQuery UI
   (`.hasDatepicker`). Setear `.value` por JS no basta: hay que
   `jQuery(inp).datepicker('setDate', new Date(y,m-1,d))`. Aun así, para tipos
@@ -1058,3 +1087,67 @@ CARPETA` en `crear_o_editar.py`, funciones en `documentos.py`:
 ✅ Validado: subió "Contrato de Trabajo" + "Cédula de Identidad" a
 `22710691-3` (2 veces), verificado en la grilla, y después limpiado con
 `--limpiar-documentos borrar`.
+
+## 13. PENDIENTES — retomar 08/09/2026 (handoff próxima sesión)
+
+Estado al cierre del 07/09/2026 (rama `carga-masiva`, sale de `Crear`).
+Pipeline `crear_o_editar.py` funcionando: crear/editar + `--no-guardar` +
+`--limpiar-documentos [listar|borrar]` + `--subir-documentos CARPETA`.
+`ejecutar_crear.bat` ahora es un menú (abre Chrome + elige modo).
+`abrir_chrome.bat` nuevo (solo abre el Chrome del 9222).
+
+### Prioridad ALTA
+1. **Verificar en vivo la carga masiva SIN Período.** El código deja el
+   Período vacío por defecto (`dejar_periodo_vacio=True`) con fallback
+   auto-completar+reintentar, pero **nunca se probó con sesión activa** (el
+   Chrome del 9222 quedó deslogueado). Correr `--subir-documentos` real con 1
+   persona con carpeta completa y ver si el reporte dice `Docs SUBIDOS`
+   (vacío OK) o `Docs SUBIDOS (hubo que completar Período)`.
+2. **Prueba end-to-end del pipeline completo** en corrida real: crear +
+   `--limpiar-documentos borrar` + `--subir-documentos` sobre 1-2 personas con
+   carpeta completa. Verificar contra el sitio.
+3. **Arreglar / completar `Ingresos Lunes 07-09-2026/`** (13 archivos de 0
+   bytes al cierre — el sitio los rechaza; 1 carpeta con <8 docs). El usuario
+   los está completando. Confirmar que estén los 8 del set estándar por
+   persona antes de correr `--subir-documentos` en serio.
+4. **Reconciliar `SHIFT.xlsx` (22 filas) vs carpeta de documentos (17
+   personas).** Decidir qué pasa con las que están en una y no en la otra.
+
+### Prioridad MEDIA
+5. **LA INTERFAZ (customtkinter).** Ya decidido con el usuario:
+   - App de escritorio con `customtkinter` (1 dependencia nueva).
+   - Cubre TODO el pipeline en una sola app: elegir Excel + carpeta Docs,
+     elegir modo (comparar / crear-editar / limpiar docs / subir docs / prueba
+     sin guardar), botón Iniciar, **log en vivo**, **barra de progreso X/N**,
+     resumen final.
+   - **La app lanza el Chrome de depuración** (botón "Abrir Chrome", como el
+     `.bat`); el login sigue siendo manual.
+   - No empezada. Es el chunk grande que falta.
+6. **Bug identidad-bloqueada al "Crear"** (§12.7): cuando el RUT ya existe en
+   la plataforma, además de Nombres/Apellidos, los combos **AFP y Sistema de
+   Salud tampoco se escriben** (quedan en default "Uno" / "Sin Información").
+   La edición siguiente lo corrige, pero convendría que quede bien a la
+   primera.
+7. **Completar `_MAPEO_NOMBRE_TIPO`** (`documentos.py`) para archivos que
+   aparezcan en otras carpetas y no estén cubiertos (hoy solo el set de
+   `Adan_Leon`: 8 tipos). Ir agregando patrones a medida que aparezcan.
+
+### Prioridad BAJA / a revisar
+8. **Período de tipos Mensual/Anual** (Liquidaciones, EPP anual): para tipos
+   "1 sola vez" el sitio fija el Período a `04/01/1990` ignore lo que se
+   ponga; sin verificar qué hace con Mensual/Anual. Si el negocio necesita el
+   período correcto ahí, investigar.
+9. **Ramas / merge.** Estamos en `carga-masiva` ← `Crear` ← `main`. Decidir
+   cuándo mergear `carga-masiva` → `Crear` y eventualmente a `main`.
+10. **`SHIFT.xlsx`**: versionado como TEMPLATE vacío (excepción `!SHIFT.xlsx`
+    en `.gitignore`). El archivo local con datos reales NUNCA se commitea —
+    `git update-index --skip-worktree SHIFT.xlsx` si molesta en `git status`.
+    Backup local de datos: `SHIFT.datos.local.xlsx`.
+
+### Cómo dejar el entorno para retomar
+- Abrir Chrome: `abrir_chrome.bat` (o `ejecutar_crear.bat`), iniciar sesión en
+  ShiftLaboral, dejar la ventana abierta (puerto 9222).
+- Si Claude Code necesita lanzarlo: `chrome.exe --remote-debugging-port=9222
+  --user-data-dir="C:\Users\GC\AppData\Local\ChromeDebugShiftLaboral" <url>`
+  (ruta ABSOLUTA — `%LOCALAPPDATA%` no expande fuera de cmd). La sesión de
+  ShiftLaboral se cae sola cada tanto (sesión única por usuario) — re-login.

@@ -608,7 +608,10 @@ def main():
                                 page, rut, proveedor, items, periodo,
                                 vencimiento_ddmmaaaa=vencimiento,
                                 guardar=(not NO_GUARDAR))
-                            verbo = {"subido": "Docs SUBIDOS", "simulado": "Docs (simulado)",
+                            verbo = {"subido": "Docs SUBIDOS",
+                                     "subido_con_periodo": "Docs SUBIDOS (hubo que completar Período)",
+                                     "rechazado": "Docs subir RECHAZADO por el sitio",
+                                     "simulado": "Docs (simulado)",
                                      "sin_rut": "Docs subir: RUT no está en la grilla",
                                      "sin_items": "Docs subir: sin items"}.get(accion, accion)
                             nota = f"{verbo} ({len(subidos)}): " + (", ".join(subidos) or "ninguno")

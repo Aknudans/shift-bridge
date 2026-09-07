@@ -8,6 +8,13 @@
 # Capturas de depuracion (pueden mostrar datos de pantalla)
 debug_*.png
 
+# Carpetas y archivos de documentos reales de colaboradores - nunca a git
+Ingresos*/
+Docs/
+Docs_*/
+*.pdf
+*.PDF
+
 # Python
 __pycache__/
 *.pyc
