@@ -1,6 +1,9 @@
 # Datos con informacion personal real de colaboradores - nunca subir a git
 *.xlsx
 ~$*.xlsx
+# Excepcion: SHIFT.xlsx se versiona SOLO como template (encabezados, sin datos).
+# ⚠️ NUNCA commitear SHIFT.xlsx con filas de personas reales.
+!SHIFT.xlsx
 
 # Capturas de depuracion (pueden mostrar datos de pantalla)
 debug_*.png
