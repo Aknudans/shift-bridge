@@ -239,3 +239,227 @@ def limpiar_documentos_trabajador(
     page.goto(BASE_URL)
     page.wait_for_load_state("networkidle")
     return ("borrado", borrados)
+
+
+# ===========================================================================
+# CARGA MASIVA DE DOCUMENTOS  (Fase 2, opcional, --subir-documentos)
+# ===========================================================================
+#
+# Vista: DocumentosTrabajador.aspx (misma de la limpieza). Botón "Carga masiva
+# documentos" = #btnDocumentosMasivos_2 -> panel inline
+# #panelCargaModalDocumentosMasivo.
+#   input file múltiple : #FileDocumentosTrabajadorMasivo
+#                         (accept .pdf,.docx,.xlsx,.jpg,.png)
+#   por archivo (fila .ext-doc-ms-row, índice N 0-based en orden de archivo):
+#     Nombre  : #nombre_documento_masivo_{N}      (texto, obligatorio)
+#     Período : #calendario_documento_masivo_{N}  (datepicker jQuery UI)
+#     Tipo    : #cboTipoDocumentos_{N}            (<select> nativo)
+#   Guardar  : #btnGuardarModalCargaMasivaDocumentos_2
+#   Cancelar : #btnCancelarModalCargaMasivaDocumentos_2
+# Procesamiento asíncrono ("actualizar la página en un par de minutos").
+# Ver CLAUDE.md §12.9.
+
+import os
+import unicodedata
+
+EXTENSIONES_OK = (".pdf", ".docx", ".xlsx", ".jpg", ".jpeg", ".png")
+
+# Los 16 tipos del catálogo (sin el prefijo "LOGISTICA FALABELLA/").
+# Confirmados en vivo 07/09/2026 leyendo el <select> #cboTipoDocumentos_0.
+CATALOGO_TIPOS_DOCUMENTO = [
+    "Anexos de Contrato",
+    "Anexos",
+    "Liquidaciones de Sueldo",
+    "Registro de Capacitación IRL (Ex Odi) Mandante",
+    "TC Reglamento Interno RIOHS mandante",
+    "Registro Entrega EPP",
+    "Registro de Capacitación Uso EPP",
+    "Contrato de Trabajo",
+    "Cédula de Identidad",
+    "Finiquito de Trabajo",
+    "Contrato puesta a disposición",
+    "Visa de trabajo o ATT",
+    "Contacto en caso de Emergencia",
+    "Toma de conocimiento marca en biometrico (EST)",
+    "Anexos de contrato personal EST",
+    "Comprobante de Entrevista del personal EST y OUT",
+]
+
+SEL_BTN_CM = "#btnDocumentosMasivos_2"
+SEL_CM_FILE = "#FileDocumentosTrabajadorMasivo"
+SEL_CM_GUARDAR = "#btnGuardarModalCargaMasivaDocumentos_2"
+SEL_CM_CANCELAR = "#btnCancelarModalCargaMasivaDocumentos_2"
+
+
+def _norm(s: str) -> str:
+    """Normaliza para comparar: mayúsculas, sin tildes, espacios colapsados."""
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    return " ".join(s.upper().split())
+
+
+def tipo_desde_nombre_archivo(nombre_archivo: str) -> Optional[str]:
+    """Del nombre del archivo (sin extensión) deduce el tipo del catálogo.
+    Devuelve el tipo EXACTO del catálogo (sin prefijo) o None si no calza."""
+    stem = os.path.splitext(os.path.basename(nombre_archivo))[0]
+    objetivo = _norm(stem)
+    for tipo in CATALOGO_TIPOS_DOCUMENTO:
+        if _norm(tipo) == objetivo:
+            return tipo
+    return None
+
+
+def preparar_items_carpeta(carpeta_persona: str):
+    """Recorre `carpeta_persona` y arma la lista de documentos a subir.
+    Devuelve (items, omitidos):
+      items    = [{"ruta", "nombre", "tipo"}]  (tipo del catálogo, sin prefijo)
+      omitidos = ["archivo.x (motivo)", ...]
+    """
+    items = []
+    omitidos = []
+    try:
+        entradas = sorted(os.listdir(carpeta_persona))
+    except Exception as e:
+        return [], [f"(no se pudo leer la carpeta: {e})"]
+    for nombre in entradas:
+        ruta = os.path.join(carpeta_persona, nombre)
+        if not os.path.isfile(ruta):
+            continue
+        ext = os.path.splitext(nombre)[1].lower()
+        if ext not in EXTENSIONES_OK:
+            omitidos.append(f"{nombre} (extensión no aceptada)")
+            continue
+        tipo = tipo_desde_nombre_archivo(nombre)
+        if not tipo:
+            omitidos.append(f"{nombre} (el nombre no calza con ningún tipo del catálogo)")
+            continue
+        items.append({"ruta": ruta, "nombre": os.path.splitext(nombre)[0], "tipo": tipo})
+    return items, omitidos
+
+
+def _seleccionar_tipo_en_combo(page: Page, indice: int, tipo_sin_prefijo: str) -> bool:
+    """Selecciona en #cboTipoDocumentos_{indice} la opción cuyo texto calza con
+    `tipo_sin_prefijo` (el <select> lista 'LOGISTICA FALABELLA/<Tipo>')."""
+    valor = page.evaluate(
+        """(args) => {
+            const cbo = document.getElementById('cboTipoDocumentos_' + args.idx);
+            if (!cbo) return null;
+            const norm = s => (s || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '')
+                .toUpperCase().replace(/\\s+/g, ' ').trim();
+            const objetivo = norm(args.tipo);
+            for (const o of cbo.options) {
+                let t = norm(o.textContent);
+                const pre = 'LOGISTICA FALABELLA/';
+                if (t.startsWith(pre)) t = t.slice(pre.length).trim();
+                if (t === objetivo) return o.value;
+            }
+            return null;
+        }""",
+        {"idx": indice, "tipo": tipo_sin_prefijo},
+    )
+    if valor is None:
+        return False
+    page.select_option(f"#cboTipoDocumentos_{indice}", value=valor)
+    return True
+
+
+def _set_periodo(page: Page, indice: int, valor_ddmmaaaa: str,
+                 campo: str = "calendario_documento_masivo"):
+    """Setea un campo de fecha (datepicker jQuery UI: Período o Fecha de
+    Vencimiento). Igual que 'Fin Contrato': .fill() suele fallar en estos
+    inputs -> se setea .value + eventos."""
+    sel = f"#{campo}_{indice}"
+    # Estos inputs son datepicker de jQuery UI. Setear el `.value` (por .fill()
+    # o por JS) NO actualiza el modelo interno del datepicker y al Guardar el
+    # sitio usa la fecha por defecto (quedó '04/01/1990' en las pruebas). Hay
+    # que usar `datepicker('setDate', Date)`.
+    page.evaluate(
+        """(args) => {
+            const inp = document.querySelector(args.sel);
+            if (!inp) return;
+            const [d, m, y] = args.val.split('/').map(Number);
+            const fecha = new Date(y, m - 1, d);
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(inp, args.val);
+            try {
+                if (window.jQuery && jQuery(inp).hasClass('hasDatepicker')) {
+                    jQuery(inp).datepicker('setDate', fecha);
+                }
+            } catch (e) {}
+            ['input', 'keyup', 'change', 'blur'].forEach(e => inp.dispatchEvent(new Event(e, {bubbles: true})));
+        }""",
+        {"sel": sel, "val": valor_ddmmaaaa},
+    )
+
+
+def subir_documentos_trabajador(
+    page: Page, rut: str, grupo_proveedor: str,
+    items, valor_ddmmaaaa: str, vencimiento_ddmmaaaa: str = "", guardar: bool = True,
+):
+    """Sube `items` ([{ruta, nombre, tipo}]) al trabajador `rut` vía la carga
+    masiva. `valor_ddmmaaaa` es el Período de TODOS. `vencimiento_ddmmaaaa`
+    es la Fecha de Vencimiento de TODOS (el sitio la exige aunque se desmarque
+    la casilla; si viene vacía se usa el mismo Período).
+
+    guardar=False -> llena el formulario pero hace Cancelar (modo prueba).
+
+    Devuelve (accion, subidos, errores):
+      accion  = "subido" | "simulado" | "sin_rut" | "sin_items"
+      subidos = [tipo, ...] cargados ; errores = [descripción, ...]
+    """
+    if not items:
+        return ("sin_items", [], [])
+    if not _abrir_vista_documentos(page, rut, grupo_proveedor):
+        return ("sin_rut", [], [])
+
+    errores = []
+    page.locator(SEL_BTN_CM).first.click(timeout=8000)
+    page.wait_for_selector(SEL_CM_FILE, state="attached", timeout=8000)
+    time.sleep(0.5)
+
+    page.set_input_files(SEL_CM_FILE, [it["ruta"] for it in items])
+    try:
+        page.wait_for_selector(f"#cboTipoDocumentos_{len(items) - 1}", timeout=10000)
+    except Exception:
+        errores.append("no aparecieron todas las filas de archivos tras seleccionarlos")
+    time.sleep(0.8)
+
+    subidos = []
+    for n, it in enumerate(items):
+        try:
+            page.fill(f"#nombre_documento_masivo_{n}", it["nombre"], timeout=4000)
+        except Exception:
+            errores.append(f"{it['nombre']}: no se pudo escribir el Nombre")
+        _set_periodo(page, n, valor_ddmmaaaa, campo="calendario_documento_masivo")
+        # La "Fecha de vencimiento" es OBLIGATORIA en este form aunque se
+        # desmarque la casilla (probado: desmarcar / ComplentarInfo no la
+        # libera). Se llena con `vencimiento_ddmmaaaa` (o el mismo Período).
+        _set_periodo(page, n, vencimiento_ddmmaaaa or valor_ddmmaaaa,
+                     campo="calendario_fecha_vencimiento_documento_masivo")
+        if _seleccionar_tipo_en_combo(page, n, it["tipo"]):
+            subidos.append(it["tipo"])
+        else:
+            errores.append(f"{it['nombre']}: el tipo '{it['tipo']}' no está en el combo")
+
+    if not guardar:
+        try:
+            page.locator(SEL_CM_CANCELAR).first.click(timeout=5000)
+        except Exception:
+            pass
+        page.goto(BASE_URL)
+        page.wait_for_load_state("networkidle")
+        return ("simulado", subidos, errores)
+
+    page.locator(SEL_CM_GUARDAR).first.click(timeout=8000)
+    page.wait_for_load_state("networkidle")
+    for sel in ("#btnExitoAceptar_grillaExternosDocumentosTrabajador_2",
+                "#btnExitoAceptar_grillaExternosDocumentosTrabajador"):
+        try:
+            if page.locator(sel).is_visible(timeout=2500):
+                page.locator(sel).click(timeout=3000)
+                break
+        except Exception:
+            pass
+    time.sleep(1.5)
+    page.goto(BASE_URL)
+    page.wait_for_load_state("networkidle")
+    return ("subido", subidos, errores)

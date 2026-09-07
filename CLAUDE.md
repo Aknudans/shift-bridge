@@ -1015,11 +1015,46 @@ página nueva — la URL sigue siendo `DocumentosTrabajador.aspx`.
    visualizar los estados actuales de los documentos"* → el procesamiento es
    **asíncrono**; tras Guardar hay que esperar / recargar antes de verificar.
 
-**Pendiente de diseñar**: de dónde saca el bot los archivos y cómo los mapea a
-`Tipo documento` + `Período` (¿por nombre de archivo?, ¿una carpeta por RUT?,
-¿una planilla de mapeo?). Explorado solo el "cómo se sube", no el "qué se
-sube".
+**IMPLEMENTADO Y VALIDADO EN VIVO (07/09/2026)** — flag `--subir-documentos
+CARPETA` en `crear_o_editar.py`, funciones en `documentos.py`:
 
-⚠️ Durante la exploración se seleccionaron 2 archivos dummy y se hizo
-**Cancelar** — NO se subió nada (verificado: PABLO `22710691-3` sigue con 0
-documentos).
+- **Estructura esperada** (decisión del usuario): `CARPETA/` con una subcarpeta
+  por persona **nombrada por el nombre** (ej. `PABLO IGNACIO ALFARO`), y adentro
+  los archivos **nombrados EXACTAMENTE como el tipo del catálogo** (ej.
+  `Contrato de Trabajo.pdf`, `Cédula de Identidad.png`). Extensiones:
+  `.pdf .docx .xlsx .jpg .jpeg .png`.
+- **Carpeta → RUT** (`_buscar_carpeta_persona` en `crear_o_editar.py`): calce por
+  conjunto de palabras normalizadas (mayúsculas, sin tildes, sin orden) —
+  la carpeta calza si sus tokens (≥2) son subconjunto de
+  `nombre+apellidoPaterno+apellidoMaterno` del Excel. Sin carpeta / ambigua →
+  se reporta y no se sube nada de esa persona.
+- **Archivo → Tipo** (`tipo_desde_nombre_archivo`): el nombre del archivo sin
+  extensión, normalizado, tiene que ser IGUAL a uno de los 16 tipos del
+  catálogo (`CATALOGO_TIPOS_DOCUMENTO`, sin el prefijo `LOGISTICA FALABELLA/`).
+  Si no calza → ese archivo se omite y se reporta (no frena al resto).
+- **Período** = `fechaContratacion` del Excel. **Fecha de vencimiento** =
+  `fechaTermino` del Excel.
+- Corre para filas con estado `CREADO`/`EDITADO`/`SIN_CAMBIOS`. Con
+  `--no-guardar` llena el form pero hace Cancelar.
+
+🔴 **Detalles que costaron (todos en `documentos.py`)**:
+- La **"Fecha de vencimiento" es OBLIGATORIA** aunque la casilla
+  `#chk_fecha_vencimiento_documento_masivo_{N}` venga marcada y se intente
+  desmarcar (probado: desmarcar por JS + `change` + llamar `ComplentarInfo(N)`
+  NO libera el campo — queda `input-error` y "Debe completar los campos
+  vacíos"). Solución: **llenarla siempre** (con `fechaTermino`).
+- **Período** y **Fecha vencimiento** son inputs datepicker de jQuery UI
+  (`.hasDatepicker`). Setear `.value` por JS no basta: hay que
+  `jQuery(inp).datepicker('setDate', new Date(y,m-1,d))`. Aun así, para tipos
+  **"1 sola vez"** (Contrato, Cédula) el sitio guarda el Período como
+  `04/01/1990` (el del tipo) sin importar lo que se ponga — parece ser por
+  diseño; sin verificar para tipos Mensual/Anual.
+- Tras `set_input_files` esperar a que aparezcan TODAS las filas
+  (`#cboTipoDocumentos_{len-1}`). El `<select>` de Tipo es NATIVO
+  (`select_option`, fácil).
+- Guardar es `#btnGuardarModalCargaMasivaDocumentos_2`; procesamiento
+  **asíncrono** (~1-2 min) — verificar recién después.
+
+✅ Validado: subió "Contrato de Trabajo" + "Cédula de Identidad" a
+`22710691-3` (2 veces), verificado en la grilla, y después limpiado con
+`--limpiar-documentos borrar`.

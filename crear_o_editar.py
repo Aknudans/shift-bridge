@@ -42,6 +42,7 @@ no modificar datos sin autorización). Validar con cuidado la primera corrida.
 """
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -84,7 +85,12 @@ from campos_formulario import (
     leer_multiselect,
     validar_cargo_existe,
 )
-from documentos import limpiar_documentos_trabajador
+from documentos import (
+    _norm as _norm_texto,
+    limpiar_documentos_trabajador,
+    preparar_items_carpeta,
+    subir_documentos_trabajador,
+)
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN — selectores específicos de Fase 2 (crear/editar). Los
@@ -116,6 +122,40 @@ NO_GUARDAR = False
 # None | "listar" | "borrar" — limpieza de documentos de personas preexistentes.
 # Lo setea main() desde --limpiar-documentos. None = no se toca nada.
 LIMPIAR_DOCUMENTOS = None
+
+# Ruta de la carpeta "Docs" (una subcarpeta por persona). None = no se sube nada.
+# Lo setea main() desde --subir-documentos.
+SUBIR_DOCUMENTOS = None
+
+
+def _buscar_carpeta_persona(base: str, nombre: str, ap_pat: str, ap_mat: str):
+    """Busca en `base` la subcarpeta cuyo nombre calce con la persona.
+
+    Calce por conjunto de palabras (sin orden, sin tildes, mayúsculas): la
+    carpeta calza si sus tokens (>=2) son un subconjunto de los tokens del
+    nombre completo del Excel. Devuelve (ruta, motivo):
+      ruta   = ruta de la carpeta, o None
+      motivo = "" si ok; texto explicando por qué no, si None
+    """
+    tokens_persona = set(_norm_texto(f"{nombre} {ap_pat} {ap_mat}").split())
+    try:
+        subcarpetas = [d for d in os.listdir(base)
+                       if os.path.isdir(os.path.join(base, d))]
+    except Exception as e:
+        return None, f"no se pudo leer '{base}': {e}"
+
+    candidatas = []
+    for d in subcarpetas:
+        toks = set(_norm_texto(d).split())
+        if len(toks) >= 2 and toks.issubset(tokens_persona):
+            candidatas.append((len(toks), d))
+    if not candidatas:
+        return None, "sin carpeta de documentos que calce con el nombre"
+    candidatas.sort(reverse=True)
+    if len(candidatas) > 1 and candidatas[0][0] == candidatas[1][0]:
+        empatadas = [d for n, d in candidatas if n == candidatas[0][0]]
+        return None, f"carpeta ambigua: {empatadas}"
+    return os.path.join(base, candidatas[0][1]), ""
 
 # Campos de texto simples: mismo ID en "editar" y en "Crear" (gran ventaja,
 # confirmado en vivo). Mapeo etiqueta -> id.
@@ -460,11 +500,18 @@ def main():
                              "vista de documentos (clic en el RUT) y 'listar' (solo reporta qué "
                              "documentos son borrables) o 'borrar' (los ELIMINA, irreversible). "
                              "Sin este flag no se toca ningún documento.")
+    parser.add_argument("--subir-documentos", metavar="CARPETA", default=None,
+                        help="Carpeta con una subcarpeta por persona (nombre = nombre del "
+                             "colaborador) y adentro los archivos (nombre del archivo = tipo del "
+                             "catálogo). Tras crear/editar a cada persona sube esos documentos por "
+                             "carga masiva. Período = fechaContratacion del Excel. Con --no-guardar "
+                             "llena el formulario pero hace Cancelar.")
     args = parser.parse_args()
 
-    global NO_GUARDAR, LIMPIAR_DOCUMENTOS
+    global NO_GUARDAR, LIMPIAR_DOCUMENTOS, SUBIR_DOCUMENTOS
     NO_GUARDAR = args.no_guardar
     LIMPIAR_DOCUMENTOS = args.limpiar_documentos
+    SUBIR_DOCUMENTOS = args.subir_documentos
     if NO_GUARDAR:
         print(">>> MODO PRUEBA (--no-guardar): se llenará el formulario pero NO se guardará nada.\n")
     if LIMPIAR_DOCUMENTOS == "listar":
@@ -473,6 +520,12 @@ def main():
     elif LIMPIAR_DOCUMENTOS == "borrar":
         print(">>> --limpiar-documentos=borrar: se BORRARÁN (irreversible) los documentos borrables "
               "de cada persona preexistente tras editar sus datos.\n")
+    if SUBIR_DOCUMENTOS:
+        if not os.path.isdir(SUBIR_DOCUMENTOS):
+            print(f"ERROR: la carpeta de documentos '{SUBIR_DOCUMENTOS}' no existe.")
+            sys.exit(1)
+        modo = "se subirán" if not NO_GUARDAR else "se llenará el form (Cancelar, sin subir)"
+        print(f">>> --subir-documentos: {modo} los documentos de '{SUBIR_DOCUMENTOS}'.\n")
 
     df = cargar_excel(args.input, COLUMNAS_EXCEL_REQUERIDAS)
     print(f"Cargados {len(df)} colaboradores desde {args.input}")
@@ -532,6 +585,43 @@ def main():
                 finally:
                     # limpiar_documentos_trabajador deja la página en la grilla
                     # base; el proveedor hay que reseleccionarlo en la sig. fila.
+                    grupo_actual = None
+
+            # Subida de documentos: si se pidió y la persona quedó en el sistema.
+            if (SUBIR_DOCUMENTOS
+                    and resultado.estado in ("CREADO", "EDITADO", "SIN_CAMBIOS")):
+                try:
+                    carpeta, motivo = _buscar_carpeta_persona(
+                        SUBIR_DOCUMENTOS, fila["NOMBRES"],
+                        fila["apellidoPaterno"], fila["apellidoMaterno"])
+                    if not carpeta:
+                        nota = f"Docs subir: {motivo}"
+                    else:
+                        items, omitidos = preparar_items_carpeta(carpeta)
+                        if not items:
+                            nota = ("Docs subir: la carpeta no tiene archivos válidos"
+                                    + (f" | omitidos: {omitidos}" if omitidos else ""))
+                        else:
+                            periodo = formatear_fecha(fila["fechaContratacion"])
+                            vencimiento = formatear_fecha(fila["fechaTermino"])
+                            accion, subidos, errs = subir_documentos_trabajador(
+                                page, rut, proveedor, items, periodo,
+                                vencimiento_ddmmaaaa=vencimiento,
+                                guardar=(not NO_GUARDAR))
+                            verbo = {"subido": "Docs SUBIDOS", "simulado": "Docs (simulado)",
+                                     "sin_rut": "Docs subir: RUT no está en la grilla",
+                                     "sin_items": "Docs subir: sin items"}.get(accion, accion)
+                            nota = f"{verbo} ({len(subidos)}): " + (", ".join(subidos) or "ninguno")
+                            if omitidos:
+                                nota += f" | omitidos: {'; '.join(omitidos)}"
+                            if errs:
+                                nota += f" | errores: {'; '.join(errs)}"
+                    resultado.detalle = (resultado.detalle + " | " + nota).strip(" |")
+                    print(f"   -> {nota}")
+                except Exception as e:
+                    resultado.detalle += f" | Docs subir: ERROR: {e}"
+                    print(f"   -> Docs subir: ERROR: {e}")
+                finally:
                     grupo_actual = None
 
             if resultado.estado in ("CREADO", "EDITADO"):
