@@ -978,3 +978,48 @@ Detalles de implementación que costaron encontrar (todos en `documentos.py`):
   `#grillaExternosDocumentosTrabajador`), tanto en `listar` como en `borrar`.
 - Blindajes anti-loop: corta si el mismo documento se intenta borrar 2 veces
   seguidas (borrado sin efecto) y tope duro de 300 iteraciones.
+
+### 12.9 Carga masiva de documentos (explorado 07/09/2026, rama `carga-masiva`)
+
+Fase siguiente: tras limpiar los documentos viejos y crear/editar a la
+persona, **subirle sus documentos nuevos** con el módulo de carga masiva del
+propio sitio.
+
+**Dónde**: en `DocumentosTrabajador.aspx` (misma vista de la limpieza, se
+llega clickeando el RUT), botón **"Carga masiva documentos"** =
+`#btnDocumentosMasivos_2` (un `<div class="btn_c">`; el `<a>` sin `_2` no
+dispara). Abre un panel inline (`#panelCargaModalDocumentosMasivo`), NO una
+página nueva — la URL sigue siendo `DocumentosTrabajador.aspx`.
+
+**Flujo**:
+1. Clic en `#btnDocumentosMasivos_2` → aparece el panel con botón "Examinar" y
+   el `<input type="file">` **`#FileDocumentosTrabajadorMasivo`**
+   (`accept=".pdf,.docx,.xlsx,.jpg,.png"`, oculto — con Playwright usar
+   `set_input_files`, acepta múltiples).
+2. Por cada archivo seleccionado aparece una fila `.ext-doc-ms-row` con índice
+   N (0-based, en el orden de los archivos):
+   | Campo | Selector | Nota |
+   |---|---|---|
+   | Nombre (a mostrar) | `#nombre_documento_masivo_{N}` | texto libre, obligatorio |
+   | Período | `#calendario_documento_masivo_{N}` | input datepicker jQuery UI (`calendarioJS`), obligatorio; mismo trato que "Fin Contrato" (setear `.value` + eventos si `.fill()` no pega) |
+   | Tipo documento | `#cboTipoDocumentos_{N}` | **`<select>` nativo** (¡fácil! `select_option`). value `-1` = sin elegir. 16 opciones `LOGISTICA FALABELLA/…` (Contrato de Trabajo, Cédula de Identidad, Anexos, Liquidaciones, Finiquito, etc. — el mismo catálogo del grid superior) |
+   | ¿Tiene fecha de vencimiento? | `#chk_fecha_vencimiento_documento_masivo_{N}` | checkbox |
+   | Fecha vencimiento | `#calendario_fecha_vencimiento_documento_masivo_{N}` | datepicker, solo si el checkbox está marcado |
+   | Quitar este archivo | icono basura en la fila | descarta el archivo del lote |
+3. **Guardar**: `#btnGuardarModalCargaMasivaDocumentos_2` (div). Cancelar:
+   `#btnCancelarModalCargaMasivaDocumentos_2`.
+4. Validaciones del sitio: "Debe completar los campos vacíos" (Nombre +
+   Período + Tipo obligatorios por fila), "Debe seleccionar al menos un
+   documento".
+5. El sitio avisa: *"Debe actualizar la pagina en un par de minutos para
+   visualizar los estados actuales de los documentos"* → el procesamiento es
+   **asíncrono**; tras Guardar hay que esperar / recargar antes de verificar.
+
+**Pendiente de diseñar**: de dónde saca el bot los archivos y cómo los mapea a
+`Tipo documento` + `Período` (¿por nombre de archivo?, ¿una carpeta por RUT?,
+¿una planilla de mapeo?). Explorado solo el "cómo se sube", no el "qué se
+sube".
+
+⚠️ Durante la exploración se seleccionaron 2 archivos dummy y se hizo
+**Cancelar** — NO se subió nada (verificado: PABLO `22710691-3` sigue con 0
+documentos).
