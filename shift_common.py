@@ -72,10 +72,53 @@ def quitar_prefijo_catalogo(valor: Optional[str]) -> str:
     return texto
 
 
+# El template SHIFT.xlsx usa los MISMOS nombres/orden de columna que la
+# "Planilla Agosto" de origen (rut, nombre, sexo, cargo, desde, hasta, afp,
+# isapre, ...), para que el usuario final copie y pegue el bloque sin remapear
+# nada. Acá se traducen a los nombres internos que espera el resto del código
+# (RUT, NOMBRES, SEXO, CARGO, fechaContratacion, fechaTermino, AFP, ISAPRE).
+# Las columnas centroCosto/sucursal vienen en el template solo para que el
+# pegado calce en columna; el bot no las usa.
+RENOMBRE_COLUMNAS_ENTRADA = {
+    "rut": "RUT",
+    "nombre": "NOMBRES",
+    "sexo": "SEXO",
+    "cargo": "CARGO",
+    "desde": "fechaContratacion",
+    "hasta": "fechaTermino",
+    "afp": "AFP",
+    "isapre": "ISAPRE",
+}
+
+
+def normalizar_sexo(valor: Optional[str]) -> str:
+    """'M' / 'Masculino' -> 'Masculino'; 'F' / 'Femenino' -> 'Femenino'.
+
+    La Planilla Agosto trae el sexo como 'M'/'F'; ShiftLaboral (y la
+    comparación de Fase 1) esperan la palabra completa. Se aplica al cargar el
+    Excel para que el resto del código no tenga que saber de esto."""
+    if valor is None:
+        return ""
+    t = str(valor).strip().upper()
+    if t in ("M", "MASCULINO"):
+        return "Masculino"
+    if t in ("F", "FEMENINO"):
+        return "Femenino"
+    if t in ("", "NAN", "NONE"):
+        return ""
+    return str(valor).strip()
+
+
 def cargar_excel(path: str, columnas_requeridas: list[str]) -> pd.DataFrame:
-    """Carga la primera hoja del Excel y valida que tenga las columnas dadas."""
+    """Carga la primera hoja del Excel, traduce los encabezados estilo
+    'Planilla Agosto' a los nombres internos, normaliza el sexo y valida que
+    estén todas las columnas obligatorias."""
     df = pd.read_excel(path, dtype=str)
     df.columns = [c.strip() for c in df.columns]
+    df = df.rename(columns=RENOMBRE_COLUMNAS_ENTRADA)
+
+    if "SEXO" in df.columns:
+        df["SEXO"] = df["SEXO"].map(normalizar_sexo)
 
     faltantes = [c for c in columnas_requeridas if c not in df.columns]
     if faltantes:

@@ -133,19 +133,33 @@ formulario. Se descartó por:
 
 ## 5. Mapeo de campos de negocio → campos del formulario
 
-| Columna en Excel | Campo en ShiftLaboral | Sección del formulario |
+🔴 **El template `SHIFT.xlsx` usa los encabezados y el orden de la "Planilla
+Agosto"** (para que el usuario final copie y pegue el bloque sin remapear).
+Hoja única, valores literales (NO fórmulas — se probó una versión con fórmulas
+y se descartó por frágil). Orden de columnas:
+
+```
+rut | nombre | apellidoPaterno | apellidoMaterno | sexo | cargo | desde | hasta | centroCosto | sucursal | afp | isapre | sueldoBase | PROVEEDOR | TIENDA
+```
+
+`shift_common.cargar_excel()` traduce esos encabezados a los nombres internos
+(`RENOMBRE_COLUMNAS_ENTRADA`) y normaliza el sexo (`normalizar_sexo`: `M`/`F`
+→ `Masculino`/`Femenino`) al cargar, así el resto del código no cambió.
+`centroCosto`/`sucursal` van solo para alinear el pegado; el bot los ignora.
+
+| Columna template (interno) | Campo en ShiftLaboral | Sección del formulario |
 |---|---|---|
-| NOMBRES | Nombres | Datos Trabajador |
+| nombre (NOMBRES) | Nombres | Datos Trabajador |
 | apellidoPaterno | Apellido Paterno | Datos Trabajador |
 | apellidoMaterno | Apellido Materno | Datos Trabajador |
-| SEXO | Sexo | Datos Trabajador |
-| fechaContratacion | Inicio Contrato | Datos Trabajador |
-| fechaTermino | Fin Contrato | Datos Trabajador (= fechaContratacion + 89 días) |
-| AFP | AFP | Datos Trabajador |
-| ISAPRE | Sistema de Salud | Datos Trabajador |
+| sexo (SEXO) | Sexo | Datos Trabajador |
+| desde (fechaContratacion) | Inicio Contrato | Datos Trabajador |
+| hasta (fechaTermino) | Fin Contrato | Datos Trabajador (= fechaContratacion + 89 días) |
+| afp (AFP) | AFP | Datos Trabajador |
+| isapre (ISAPRE) | Sistema de Salud | Datos Trabajador |
 | sueldoBase | Sueldo Base | Datos Trabajador |
 | PROVEEDOR | Proveedores | Relación Clientes |
-| CARGO | (dropdown sin label visible) | Categoría Trabajador — texto libre, sin validación en Excel |
+| cargo (CARGO) | (dropdown sin label visible) | Categoría Trabajador — el usuario pone el valor exacto del catálogo (`LOGISTICA FALABELLA/…`) a mano |
 | TIENDA | (dropdown sin label visible) | Tiendas |
 
 ## 6. Flujo paso a paso verificado EN VIVO (05/08/2026, con Claude in Chrome)
@@ -533,7 +547,9 @@ campos_formulario.py    — primitivas de lectura/escritura de campos del
                           negocio. NO se ejecuta solo, lo importa crear_o_editar.py.
 buscar_y_comparar.py   — script principal, Fase 1 (búsqueda + comparación)
 ejecutar_bot.bat        — launcher de un click para Fase 1 (solo comparación)
-crear_o_editar.py       — script Fase 2 (creación/edición), ver sección 12
+crear_o_editar.py       — script Fase 2 (creación/edición), ver sección 12.
+                          Acepta --no-guardar: llena el formulario pero NO
+                          hace clic en Guardar (modo prueba, ver 12.6).
 ejecutar_crear.bat      — launcher de un click para Fase 2, dedicado y separado
                           del anterior a propósito (repo: rama `Crear`)
 requirements.txt       — dependencias Python
@@ -764,8 +780,201 @@ explícita: no modificar datos reales todavía). Se encontraron y corrigieron
    editable del RUT es `#txtRutVer_I` — `#txtRutVer_Raw` es un input oculto
    (`type="hidden"`) que no hay que tocar directamente.
 
-⚠️ **Sigue pendiente**: el botón `#btnGuardar` nunca se clickeó de verdad
-(decisión explícita del usuario). Antes de usar `crear_o_editar.py` contra
-datos de producción, probarlo con cuidado con 1-2 filas de prueba primero,
-observando visualmente cada paso — mismo protocolo que la sección 8, pero
-para Fase 2.
+### 12.6 Segunda ronda de pruebas del script (07/09/2026, RUT `22710691-3`)
+
+Pasada real de `crear_o_editar.py --no-guardar` (flag nuevo, ver abajo) contra
+un colaborador nuevo del "Grupo Colchagua". El formulario se llenó completo y
+correcto (13 campos, idénticos a una pasada manual de control con Claude in
+Chrome), **sin clickear Guardar todavía**. Hallazgos:
+
+5. **`--no-guardar` (modo prueba).** `crear_o_editar.py` ahora acepta
+   `--no-guardar`: llena todo el formulario pero NO hace clic en `#btnGuardar`,
+   deja el navegador/formulario abiertos y reporta estado `SIMULADO_CREAR` /
+   `SIMULADO_EDITAR`. Es el modo con que se valida cada cambio antes de tocar
+   datos reales. Sin el flag, el comportamiento es el de siempre (sí guarda).
+
+6. 🔴 **Bug de timing en `confirmar_proveedor_seleccionado()`** (corregido).
+   El botón `>` dispara un callback AJAX de DevExpress que INYECTA las
+   secciones "Categoría Trabajador" y "Tiendas" en el DOM. `networkidle` +
+   `time.sleep(0.5)` se cumplían ~0.5s ANTES de que esas secciones
+   aparecieran (medido en vivo: aparecían a ~1.06s). Resultado:
+   `validar_cargo_existe()` corría contra un DOM sin la sección, no encontraba
+   la etiqueta, y **TODAS las filas se reportaban como `OMITIDO_CARGO`** aunque
+   el Cargo existiera perfectamente en el catálogo. Fix: `confirmar_proveedor_
+   seleccionado()` ahora hace `page.wait_for_function(...)` esperando a que
+   aparezca la etiqueta "Categoría Trabajador:" antes de devolver. Mismo
+   patrón de bug que el filtro de RUT / grid (secciones 7 y 11): en este sitio
+   `networkidle` NO es señal fiable de "callback DevExpress terminó".
+
+7. **Espera de ítems del listbox.** `obtener_opciones_multiselect()` y
+   `establecer_multiselect_valor_unico()` reemplazaron su `time.sleep(0.3)`
+   fijo tras abrir el dropdown por `_esperar_items_listbox()` (espera a que
+   haya al menos un ítem con checkbox visible). El dropdown de "Categoría
+   Trabajador" tiene ~122 opciones y a veces no alcanzaba a renderizar en
+   0.3s → lista vacía → Cargo válido descartado.
+
+8. **Fin Contrato es un input con datepicker de jQuery UI** (`class="inp
+   hasDatepicker"`), NO un ASPxDateEdit de DevExpress. `escribir_campo_texto()`
+   (Playwright `.fill()`) SÍ funciona en él. (Nota: interacción por teclado
+   vía CDP crudo — fuera de Playwright — no "pega" en este campo; hay que usar
+   `.fill()` o setear `.value` + eventos `input/change/blur`.)
+
+9. **Los combos Sexo/AFP/Isapre SÍ responden a `escribir_combobox_simple()`**
+   (abrir con click en el input `[id*="cbXxx"][id$="_I"]` + click en la opción
+   por texto). Confirmado en la pasada del script.
+
+10. **Catálogo de Cargo**: tiene 122 opciones e incluye TANTO
+    `LOGISTICA FALABELLA/Operario de Bodega` COMO
+    `LOGISTICA FALABELLA/Operario de Bodega EST` (son dos cargos distintos).
+    Para "Operario de Bodega" de la planilla, el valor de negocio habitual es
+    la variante **`EST`** — pero la decisión la toma el usuario final a mano en
+    la planilla (ver 12.4), el bot solo valida contra el catálogo real.
+
+11. **Sección "Marcas"** (dropdown + botón `>` + grilla "No existe
+    información", debajo de Tiendas en el formulario de crear/editar):
+    **fuera de alcance**, el bot NO la toca. No está en las columnas del Excel
+    ni en los requerimientos.
+
+12. **Lanzar el Chrome de depuración**: el `--user-data-dir` DEBE ser una ruta
+    absoluta real. Si se pasa `%LOCALAPPDATA%\ChromeDebugShiftLaboral` desde un
+    shell que no expande esa variable (p.ej. Git Bash), Chrome la rechaza con
+    *"DevTools remote debugging requires a non-default data directory"* y NO
+    abre el puerto 9222. `ejecutar_crear.bat` corre en cmd, donde sí expande —
+    pero al invocar Chrome a mano usar la ruta completa
+    (`C:\Users\<user>\AppData\Local\ChromeDebugShiftLaboral`).
+
+✅ **Guardado real VALIDADO (07/09/2026).** Corrida final de
+`crear_o_editar.py` SIN `--no-guardar`, 1 fila (RUT `22710691-3`, PABLO
+IGNACIO ALFARO BAHAMONDE, Grupo Colchagua): estado `CREADO`. Verificado
+después abriendo la vista "ver" del propio sistema — los 13 campos quedaron
+guardados correctos (Sexo Masculino, Inicio 07/09/2026, Fin 05/12/2026, AFP
+Uno, Salud Fonasa, Sueldo 0, Proveedor Grupo Colchagua, Cargo
+"LOGISTICA FALABELLA/Operario de Bodega EST", Tienda "LOF1 ACCESO1"). El reset
+post-guardado (`navegar_a_trabajadores_por_menu`: hamburguesa → Externos →
+Trabajadores) también funcionó y dejó la vista lista para la fila siguiente.
+El botón real es `#btnGuardar` y `crear_trabajador_nuevo()` lo clickea al final.
+
+✅ **Edición con Guardar real VALIDADA (07/09/2026).** Sobre el mismo RUT
+`22710691-3` recién creado: se cambió en el Excel `AFP` (Uno→Modelo) y
+`sueldoBase` (0→550000), se corrió el script → estado `EDITADO: Campos
+actualizados: Sueldo Base, AFP`. Verificado en la vista "ver": ambos campos
+cambiaron y **todo el resto quedó intacto** (la lógica de "modificar solo lo
+que difiere" funciona, no hubo falsos positivos en Proveedores/Cargo/Tiendas/
+fechas/nombres). Después se revirtió al estado original con otra corrida
+(EDITADO de vuelta a Uno/0).
+
+### 12.7 Primer lote real (07/09/2026) — bug de "campo readonly" (corregido)
+
+Lote de 6 filas de "Grupo Colchagua" (5 nuevas + PABLO ya existente).
+Resultado: **3 CREADO, 1 SIN_CAMBIOS (PABLO), 2 ERROR**. Verificado contra el
+sistema: los 3 CREADO existen, los 2 ERROR NO dejaron nada a medias, el manejo
+de error por fila funcionó (el lote siguió tras cada fallo) y el reset entre
+filas (`navegar_a_trabajadores_por_menu`) aguantó las 6 iteraciones.
+
+🔴 **Las 2 filas que fallaban** (`22708167-8`, `11847694-8`): NO era una race
+condition — era **determinista**. Esos RUT **ya existen en la maestra de
+personas de ShiftLaboral** (registrados por OTRO cliente; la plataforma es
+compartida entre todos los proveedores de LOGISTICA FALABELLA — verificado:
+NO están en Colchagua ni en Santa Cruz). Al confirmar en "Crear" un RUT que la
+plataforma ya conoce, el sitio **autocompleta Nombres/Apellidos/Sexo y los
+deja `readonly`** (no dejás cambiar la identidad legal de alguien; solo lo
+asocias a tu grupo). El código hacía `escribir_campo_texto('txtNombres', ...)`
+sin condición → `.fill()` sobre un `readonly` → `Locator.fill: Timeout 30000ms
+... element is not editable` → `ERROR`.
+
+**Fix (07/09/2026, `crear_trabajador_nuevo`)**: tras `#btnAceptaRut` se espera
+a que el form quede en uno de 2 estados (`wait_for_function`): campo editable
+(RUT nuevo) **o** campo `readonly` con valor precargado (RUT ya en el
+sistema). Si está bloqueado:
+- Se **comparan** Nombres/Apellido Paterno/Apellido Materno del sistema contra
+  el Excel (con `normalizar_texto`).
+- **Coinciden** → se sigue el flujo SIN tocar identidad/Sexo; se llena el
+  resto (Sueldo/AFP/Isapre/fechas/Proveedor/Cargo/Tienda) y se guarda.
+  `detalle` lleva la nota "(identidad ya existía en ShiftLaboral y coincide…)".
+- **Difieren** → `cerrar_formulario` y `ResultadoFila(estado="ERROR", ...)`
+  con el detalle de qué campo difiere ("sistema: 'X' / excel: 'Y'"). No crea
+  nada. (Comportamiento pedido explícitamente por el usuario.)
+
+Bugs de apoyo corregidos en la misma tanda:
+- **Crash de Unicode**: `print(f"... {e}")` de un error de Playwright reventaba
+  con `UnicodeEncodeError` (consola cp1252 no puede con las flechas del call
+  log) y **mataba todo el script**. Fix: `sys.stdout/err.reconfigure(
+  encoding="utf-8", errors="replace")` al inicio de `crear_o_editar.py`.
+- **Overlay del grid intercepta clics**: `dxgvLoadingDiv` tapando la grilla
+  hacía fallar la apertura del dropdown de Cargo en la rama de edición. Fix:
+  `_esperar_grid_sin_overlay()` en `campos_formulario.py`, llamado antes de
+  abrir el dropdown en `obtener_opciones_multiselect` y
+  `establecer_multiselect_valor_unico`.
+- La `esperar_campos_formulario_editables()` sigue usándose en
+  `editar_trabajador_existente` (tras el lápiz).
+
+**Validado en `--no-guardar`** con el lote de 6: 4 `SIN_CAMBIOS`, 2
+`SIMULADO_CREAR` (Matias y Cristian, identidad preexistente que coincide),
+0 `ERROR`.
+
+⚠️ **Aún sin cerrar**: la corrida REAL (sin `--no-guardar`) de esas 2 filas
+(`22708167-8`, `11847694-8`) para confirmar que Guardar asocia bien a una
+persona con identidad preexistente. Y validar un lote más grande.
+
+⚠️ **Bug menor pendiente** (rama identidad-bloqueada): al "Crear" un RUM ya
+conocido, además de Nombres/Apellidos también los combos **AFP y Sistema de
+Salud quedan sin escribir** (se guardan con el default "Uno" / "Sin
+Información"). La pasada de edición siguiente lo detecta y corrige
+(`EDITADO: AFP, Sistema de Salud`), pero convendría arreglarlo para que quede
+bien a la primera.
+
+### 12.8 Limpieza de documentos de personas preexistentes (07/09/2026)
+
+Requerimiento: si al "Crear" la persona YA EXISTE, después de editar sus datos
+hay que **dejarla sin documentación** — borrar los documentos que el proveedor
+subió en un registro anterior.
+
+- **Vista**: `DocumentosTrabajador.aspx`. Se llega **clickeando el RUT en la
+  grilla** (`a[id*="link_Codigo_0"]`), NO el lápiz. Tiene una grilla superior
+  (checklist de tipos, no se toca) y una **grilla inferior** (`tr.dxgvDataRow`)
+  con los documentos subidos.
+- Cada fila tiene icono `ver` y, **solo si lo subió el proveedor**, también
+  `borrar` (`a[title="borrar"]`). Los documentos cargados por el **mandante**
+  no tienen `borrar` — no se pueden ni se deben tocar.
+- **Popup de confirmación** (DevExpress, ya en el DOM): contenedor
+  `#popupConfirmacionBorrar_grillaExternosDocumentosTrabajador`, confirmar
+  `#btnConfirmacionBorrarAceptar`, cancelar `#btnConfirmacionBorrarCancelar`.
+  Tras borrar aparece popup de éxito → `#btnExitoAceptar_grillaExternosDocumentosTrabajador`.
+  (NO es `window.confirm` nativo.)
+- **Módulo `documentos.py`** → `limpiar_documentos_trabajador(page, rut,
+  grupo, borrar)`. Navega a la grilla, selecciona grupo, filtra el RUT, abre
+  la vista de documentos y:
+  - `borrar=False` → devuelve la lista de documentos borrables. No borra.
+  - `borrar=True` → los borra uno por uno (clic borrar → confirmar → aceptar
+    éxito), con guarda anti-loop (si el conteo no baja, corta). Al terminar
+    vuelve a `BASE_URL`.
+- **`crear_o_editar.py`**: flag `--limpiar-documentos [listar|borrar]` (default
+  sin flag = no toca nada; `--limpiar-documentos` a secas = `listar`). Solo
+  corre para filas con `ResultadoFila.preexistente=True` (rama de edición, o
+  "Crear" con identidad bloqueada que coincide) y estado ≠ ERROR. El resultado
+  se anexa a `detalle` ("Docs borrables (N): …" / "Docs BORRADOS (N): …").
+- **Validado end-to-end (07/09/2026)**: `borrar` contra RUT `20401344-6`
+  (Adán) → eliminó sus **9 documentos** del proveedor (Contrato de Trabajo,
+  Cédula, Anexos, capacitaciones, etc.), dejó los del mandante, verificado
+  "borrables restantes: 0".
+
+Detalles de implementación que costaron encontrar (todos en `documentos.py`):
+- **Aceptar el popup de éxito es obligatorio entre borrados.** Tras confirmar
+  ("¿Está seguro?" → `#btnConfirmacionBorrarAceptar`) aparece
+  "Operación exitosa … Aceptar". Si no se acepta, su **overlay
+  `.ui-widget-overlay` (jQuery UI modal) queda tapando la grilla** y el
+  siguiente clic en `borrar` falla con "intercepts pointer events". El botón
+  real es **`#btnExitoAceptar_grillaExternosDocumentosTrabajador_2`** (un
+  `<div class="btn_c">`, NO el `<a>` con id sin `_2`). Idem el de confirmación
+  puede tener variante `_2`. Se prueban ambos.
+- Antes de cada clic se espera a que no haya `.ui-widget-overlay`,
+  `[class*="dxpcModalBackground"]`, `.modalExternos` ni
+  `#grillaExternosDocumentosTrabajador_LD` visibles (`_esperar_sin_overlays`),
+  y se cierra cualquier diálogo que haya quedado abierto (`_cerrar_dialogo_abierto`).
+- **La grilla de documentos PAGINA** (10 por página; el ejemplo tenía 25 docs
+  en 3 páginas). `page.locator('a[title="borrar"]').count()` solo ve la página
+  actual. Se recorren todas las páginas (`_total_paginas` lee "Página X de N"
+  del texto, `_ir_a_pagina` clickea el número en el pager
+  `#grillaExternosDocumentosTrabajador`), tanto en `listar` como en `borrar`.
+- Blindajes anti-loop: corta si el mismo documento se intenta borrar 2 veces
+  seguidas (borrado sin efecto) y tope duro de 300 iteraciones.

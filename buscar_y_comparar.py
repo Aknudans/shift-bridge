@@ -15,24 +15,6 @@ Excel. Genera un Excel de reporte con 3 estados posibles por fila:
 Esta fase NO crea, edita ni borra nada. Solo lee. Es seguro de correr las veces
 que quieras.
 
-REQUISITOS PREVIOS (una sola vez):
-    1. Python 3.9+
-    2. pip install playwright pandas openpyxl
-       playwright install chromium   (o usa tu Chrome normal, ver más abajo)
-    3. Abrir Google Chrome manualmente con depuración remota habilitada:
-
-       Windows (cmd):
-           "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222
-
-       Mac:
-           /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222
-
-    4. En esa ventana de Chrome, iniciar sesión MANUALMENTE en ShiftLaboral
-       (https://externoslof.shiftlabor.com/) con tu usuario y contraseña, como
-       siempre. El bot NUNCA maneja contraseñas — solo reutiliza tu sesión ya
-       iniciada.
-    5. Dejar esa ventana de Chrome abierta y correr este script.
-
 EXCEL DE ENTRADA ESPERADO (primera hoja del archivo):
     Columnas obligatorias (nombres exactos, case-insensitive):
         RUT, NOMBRES, apellidoPaterno, apellidoMaterno, SEXO, AFP, ISAPRE,

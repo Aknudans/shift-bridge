@@ -35,6 +35,33 @@ def cerrar_formulario(page: Page):
         pass
 
 
+def esperar_campos_formulario_editables(page: Page, timeout: int = 15000):
+    """Espera a que el formulario de crear/editar trabajador esté REALMENTE
+    editable, no solo presente en el DOM.
+
+    🔴 Tras abrir el formulario (clic en el lápiz "editar", o en el botón ">"
+    que confirma el RUT en "Crear"), DevExpress corre un callback
+    (`Aspxcallbackpanel2`) que arma los campos. Mientras no termina,
+    `#txtNombres` ya EXISTE pero está `readonly` — y `networkidle` NO detecta
+    ese callback. Esperar solo `wait_for_selector('#txtNombres')` + un
+    `time.sleep` fijo provocaba ERROR intermitente ("element is not editable",
+    `Locator.fill` timeout 30s) en corridas de lote — confirmado 07/09/2026:
+    2 de 6 filas fallaron así. Acá se espera a que el campo no tenga
+    `readOnly`/`disabled`."""
+    try:
+        page.wait_for_function(
+            """() => { const e = document.getElementById('txtNombres');
+                       return e && !e.readOnly && !e.disabled; }""",
+            timeout=timeout,
+        )
+    except Exception:
+        # No se puso editable a tiempo: dejar que el paso siguiente falle de
+        # forma visible (se registra como ERROR y el lote sigue con la
+        # siguiente fila).
+        pass
+    time.sleep(0.2)
+
+
 def _input_por_etiqueta(page: Page, etiqueta: str) -> Optional[str]:
     """Devuelve el id del input/select asociado a una etiqueta visible.
 
@@ -113,6 +140,40 @@ def leer_multiselect(page: Page, etiqueta: str) -> list[str]:
     return [v.strip() for v in valor.split(";") if v.strip()]
 
 
+def _esperar_grid_sin_overlay(page: Page, timeout: int = 10000):
+    """Espera a que el overlay de carga del grid (`dxgvLoadingDiv`) desaparezca.
+
+    Ese overlay tapa toda la grilla y **intercepta los clics** — si está activo
+    cuando se intenta abrir un dropdown (Proveedores/Cargo/Tiendas), Playwright
+    reintenta hasta agotar el timeout y la fila cae en ERROR
+    (`dxgvLoadingDiv intercepts pointer events`). Aparece tras cualquier
+    callback de DevExpress sobre la grilla y `networkidle` no lo detecta."""
+    try:
+        page.wait_for_function(
+            """() => { const d = document.getElementById('grillaExternosProveedorTrabajadores_LD');
+                       return !d || d.offsetParent === null; }""",
+            timeout=timeout,
+        )
+    except Exception:
+        pass
+
+
+def _esperar_items_listbox(page: Page, timeout: int = 5000):
+    """Espera a que el listbox de DevExpress recién abierto tenga al menos un
+    ítem con checkbox visible. El dropdown de "Categoría Trabajador" tiene
+    ~122 opciones y tarda en renderizar — con un `time.sleep` fijo corto a
+    veces se leía la lista vacía y se descartaba un Cargo que sí existía."""
+    try:
+        page.wait_for_function(
+            """() => Array.from(document.querySelectorAll('.dxeListBoxItem'))
+                .some(e => e.offsetParent !== null && e.querySelector('input[type=checkbox]'))""",
+            timeout=timeout,
+        )
+    except Exception:
+        pass
+    time.sleep(0.2)
+
+
 def obtener_opciones_multiselect(page: Page, etiqueta: str) -> list[dict]:
     """Abre el dropdown de un multi-select y devuelve todas sus opciones
     visibles con su texto y si están marcadas. NO cierra el dropdown.
@@ -126,8 +187,9 @@ def obtener_opciones_multiselect(page: Page, etiqueta: str) -> list[dict]:
     campo_id = _input_por_etiqueta(page, etiqueta)
     if not campo_id:
         return []
+    _esperar_grid_sin_overlay(page)
     page.locator(f"#{campo_id}").click(timeout=5000)
-    time.sleep(0.3)
+    _esperar_items_listbox(page)
     return page.evaluate(
         """() => {
             const items = Array.from(document.querySelectorAll('.dxeListBoxItem'))
@@ -158,8 +220,9 @@ def establecer_multiselect_valor_unico(page: Page, etiqueta: str, valor_deseado:
     campo_id = _input_por_etiqueta(page, etiqueta)
     if not campo_id:
         return False
+    _esperar_grid_sin_overlay(page)
     page.locator(f"#{campo_id}").click(timeout=5000)
-    time.sleep(0.3)
+    _esperar_items_listbox(page)
 
     resultado = page.evaluate(
         """(valorDeseado) => {
@@ -206,7 +269,28 @@ def validar_cargo_existe(page: Page, cargo_deseado: str) -> bool:
 
 def confirmar_proveedor_seleccionado(page: Page):
     """Hace clic en el botón '>' que confirma el Proveedor y habilita las
-    secciones de Categoría Trabajador (Cargo) y Tiendas."""
+    secciones de Categoría Trabajador (Cargo) y Tiendas.
+
+    🔴 El '>' dispara un callback AJAX de DevExpress que INYECTA las secciones
+    "Categoría Trabajador" y "Tiendas" en el DOM. `networkidle` se cumple
+    ANTES de que ese callback termine (mismo patrón que el filtro de RUT y el
+    grid — ver CLAUDE.md secciones 7/11). Por eso se ESPERA EXPLÍCITAMENTE a
+    que aparezca la etiqueta "Categoría Trabajador:" antes de devolver el
+    control. Sin esta espera, `validar_cargo_existe` corría contra un DOM sin
+    esa sección y reportaba TODAS las filas como OMITIDO_CARGO
+    (bug confirmado en vivo 07/09/2026: la sección tardaba ~0.5s más en
+    aparecer de lo que `time.sleep(0.5)` cubría)."""
     page.locator(f'[id*="{ID_FRAGMENTO_CONFIRMAR_PROVEEDOR}"]').first.click(timeout=5000)
     page.wait_for_load_state("networkidle")
-    time.sleep(0.5)
+    try:
+        page.wait_for_function(
+            """() => !!Array.from(document.querySelectorAll('*')).find(
+                e => e.children.length === 0 && e.textContent.trim() === 'Categoría Trabajador:'
+            )""",
+            timeout=10000,
+        )
+    except Exception:
+        # No apareció en 10s: no forzamos error acá, dejamos que el paso
+        # siguiente (validar_cargo_existe) falle de forma visible y explícita.
+        pass
+    time.sleep(0.3)
