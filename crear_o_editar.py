@@ -75,6 +75,7 @@ from shift_common import (
 )
 from campos_formulario import (
     cerrar_formulario,
+    cerrar_popup_operacion_exitosa,
     confirmar_proveedor_seleccionado,
     esperar_campos_formulario_editables,
     escribir_campo_texto,
@@ -84,12 +85,15 @@ from campos_formulario import (
     leer_combobox_simple,
     leer_multiselect,
     validar_cargo_existe,
+    verificar_guardado_exitoso,
 )
 from documentos import (
     _norm as _norm_texto,
+    DOCUMENTOS_SET_ESTANDAR,
     limpiar_documentos_trabajador,
     preparar_items_carpeta,
     subir_documentos_trabajador,
+    tipos_documentos_existentes,
 )
 
 # ---------------------------------------------------------------------------
@@ -126,6 +130,10 @@ LIMPIAR_DOCUMENTOS = None
 # Ruta de la carpeta "Docs" (una subcarpeta por persona). None = no se sube nada.
 # Lo setea main() desde --subir-documentos.
 SUBIR_DOCUMENTOS = None
+
+# True = listar (solo lectura) los tipos de documento que cada persona ya
+# tiene, antes de tocar nada. Lo setea main() desde --verificar-documentos.
+VERIFICAR_DOCUMENTOS = False
 
 
 def _buscar_carpeta_persona(base: str, nombre: str, ap_pat: str, ap_mat: str):
@@ -212,6 +220,53 @@ def formatear_fecha(valor: Optional[str]) -> str:
         return ""
     fecha = pd.to_datetime(valor)
     return fecha.strftime("%d/%m/%Y")
+
+
+def _vacio(valor) -> bool:
+    """True si una celda del Excel debe tratarse como 'no se completó'."""
+    if valor is None:
+        return True
+    if isinstance(valor, float) and pd.isna(valor):
+        return True
+    return str(valor).strip().lower() in ("", "nan", "nat")
+
+
+def autocompletar_campos_negocio(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica defaults de negocio a columnas que el usuario puede dejar vacías,
+    y deja una marca por fila para que el reporte final avise que se usó un
+    default en vez de lo que el Excel realmente traía:
+
+    - fechaTermino vacía -> fechaContratacion + 89 días (misma regla ya usada
+      para calcular "hasta" en la Planilla Agosto, ver CLAUDE.md sección 5).
+    - sueldoBase vacío -> se interpreta como 0 (antes quedaba como 'nan' y se
+      escribía literal en el campo Sueldo Base del formulario).
+    """
+    df = df.copy()
+    df["_fecha_termino_autocompletada"] = False
+    df["_sueldo_autocompletado"] = False
+
+    for idx, fila in df.iterrows():
+        if _vacio(fila.get("fechaTermino")) and not _vacio(fila.get("fechaContratacion")):
+            inicio = pd.to_datetime(fila["fechaContratacion"])
+            df.at[idx, "fechaTermino"] = str(inicio + pd.Timedelta(days=89))
+            df.at[idx, "_fecha_termino_autocompletada"] = True
+        if _vacio(fila.get("sueldoBase")):
+            df.at[idx, "sueldoBase"] = "0"
+            df.at[idx, "_sueldo_autocompletado"] = True
+
+    return df
+
+
+def _con_nota_autocompletado(resultado: ResultadoFila, fila: pd.Series) -> ResultadoFila:
+    notas = []
+    if bool(fila.get("_fecha_termino_autocompletada")):
+        notas.append("Fin Contrato autocompletado a "
+                      f"{formatear_fecha(fila['fechaTermino'])} (Inicio + 89 días; venía vacío en el Excel)")
+    if bool(fila.get("_sueldo_autocompletado")):
+        notas.append("Sueldo Base autocompletado a 0 (venía vacío en el Excel)")
+    if notas:
+        resultado.detalle = (resultado.detalle + " | " + "; ".join(notas)).strip(" |")
+    return resultado
 
 
 # ---------------------------------------------------------------------------
@@ -329,21 +384,39 @@ def editar_trabajador_existente(page: Page, fila: pd.Series) -> ResultadoFila:
 
     if not campos_cambiados:
         cerrar_formulario(page)
-        return ResultadoFila(rut=rut, nombre_excel=nombre_completo, estado="SIN_CAMBIOS",
-                              detalle="Todos los datos ya coincidían.")
+        return _con_nota_autocompletado(ResultadoFila(
+            rut=rut, nombre_excel=nombre_completo, estado="SIN_CAMBIOS",
+            detalle="Todos los datos ya coincidían.",
+        ), fila)
 
     if NO_GUARDAR:
-        return ResultadoFila(
+        return _con_nota_autocompletado(ResultadoFila(
             rut=rut, nombre_excel=nombre_completo, estado="SIMULADO_EDITAR",
             detalle="Cambios preparados, NO guardado (--no-guardar): " + ", ".join(campos_cambiados),
-        )
+        ), fila)
 
     page.locator(SELECTOR_BTN_GUARDAR).click(timeout=5000)
     page.wait_for_load_state("networkidle")
     time.sleep(0.5)
 
-    return ResultadoFila(rut=rut, nombre_excel=nombre_completo, estado="EDITADO",
-                          detalle="Campos actualizados: " + ", ".join(campos_cambiados))
+    # Mismo popup "Operación Exitosa" que en crear_trabajador_nuevo — cerrarlo
+    # antes de seguir o el overlay traba todo lo que viene después.
+    cerrar_popup_operacion_exitosa(page)
+
+    # Igual que en crear_trabajador_nuevo: confirmar que el sitio no dejó el
+    # formulario abierto por un error de validación antes de reportar éxito.
+    guardado_ok, motivo_error = verificar_guardado_exitoso(page)
+    if not guardado_ok:
+        cerrar_formulario(page)
+        return ResultadoFila(
+            rut=rut, nombre_excel=nombre_completo, estado="ERROR",
+            detalle=f"No se pudo confirmar la edición: {motivo_error}",
+        )
+
+    return _con_nota_autocompletado(ResultadoFila(
+        rut=rut, nombre_excel=nombre_completo, estado="EDITADO",
+        detalle="Campos actualizados: " + ", ".join(campos_cambiados),
+    ), fila)
 
 
 # ---------------------------------------------------------------------------
@@ -457,17 +530,55 @@ def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
     )
 
     if NO_GUARDAR:
-        return ResultadoFila(
+        return _con_nota_autocompletado(ResultadoFila(
             rut=rut, nombre_excel=nombre_completo, estado="SIMULADO_CREAR",
             detalle=f"Formulario de creación lleno, NO se hizo clic en Guardar (--no-guardar).{nota_identidad}",
-        )
+        ), fila)
 
     page.locator(SELECTOR_BTN_GUARDAR).click(timeout=5000)
     page.wait_for_load_state("networkidle")
     time.sleep(0.5)
 
-    return ResultadoFila(rut=rut, nombre_excel=nombre_completo, estado="CREADO",
-                          detalle=f"Colaborador creado con los datos del Excel.{nota_identidad}")
+    # 🔴 ShiftLaboral muestra un popup modal "Operación Exitosa" con botón
+    # "Aceptar" tras guardar. Si no se cierra, su overlay tapa la página y
+    # TODO lo que sigue (releer la grilla, la fila siguiente) se cuelga
+    # esperando un elemento tapado — el lote entero queda trabado en esta
+    # misma fila sin poder avanzar. Cerrarlo ANTES de verificar nada más.
+    cerrar_popup_operacion_exitosa(page)
+
+    # No asumir éxito solo porque no hubo excepción: el sitio no cambia de URL
+    # al guardar, así que un error de validación (campo obligatorio vacío,
+    # formato inválido) deja el mismo formulario abierto en vez de avisar con
+    # una excepción de Playwright. Confirmar explícitamente.
+    guardado_ok, motivo_error = verificar_guardado_exitoso(page)
+    if not guardado_ok:
+        cerrar_formulario(page)
+        return ResultadoFila(
+            rut=rut, nombre_excel=nombre_completo, estado="ERROR",
+            detalle=f"No se pudo confirmar la creación: {motivo_error}",
+        )
+
+    # Confirmación positiva: releer la grilla y verificar que el RUT
+    # realmente quedó ahí, en vez de confiar en la ausencia de errores.
+    try:
+        limpiar_filtro(page)
+    except Exception:
+        pass
+    try:
+        creado_en_grilla = buscar_rut(page, rut)
+    except Exception:
+        creado_en_grilla = False
+    if not creado_en_grilla:
+        return ResultadoFila(
+            rut=rut, nombre_excel=nombre_completo, estado="ERROR",
+            detalle="Se guardó sin errores de validación, pero el RUT no aparece en la grilla "
+                    "al re-buscarlo: no se pudo confirmar la creación.",
+        )
+
+    return _con_nota_autocompletado(ResultadoFila(
+        rut=rut, nombre_excel=nombre_completo, estado="CREADO",
+        detalle=f"Colaborador creado con los datos del Excel.{nota_identidad}",
+    ), fila)
 
 
 # ---------------------------------------------------------------------------
@@ -505,13 +616,22 @@ def main():
                              "colaborador) y adentro los archivos (nombre del archivo = tipo del "
                              "catálogo). Tras crear/editar a cada persona sube esos documentos por "
                              "carga masiva. Período = fechaContratacion del Excel. Con --no-guardar "
-                             "llena el formulario pero hace Cancelar.")
+                             "llena el formulario pero hace Cancelar. NUNCA re-sube un tipo de "
+                             "documento que la persona ya tenga cargado (ver tipos_documentos_"
+                             "existentes en documentos.py).")
+    parser.add_argument("--verificar-documentos", action="store_true",
+                        help="De solo lectura: lista los tipos de documento que CADA persona YA "
+                             "tiene cargados (proveedor o mandante), sin subir ni borrar nada. "
+                             "Pensado como paso previo de chequeo antes de --subir-documentos "
+                             "(que de todas formas ya evita duplicar un tipo existente por su "
+                             "cuenta). Se puede usar solo o junto con --subir-documentos.")
     args = parser.parse_args()
 
-    global NO_GUARDAR, LIMPIAR_DOCUMENTOS, SUBIR_DOCUMENTOS
+    global NO_GUARDAR, LIMPIAR_DOCUMENTOS, SUBIR_DOCUMENTOS, VERIFICAR_DOCUMENTOS
     NO_GUARDAR = args.no_guardar
     LIMPIAR_DOCUMENTOS = args.limpiar_documentos
     SUBIR_DOCUMENTOS = args.subir_documentos
+    VERIFICAR_DOCUMENTOS = args.verificar_documentos
     if NO_GUARDAR:
         print(">>> MODO PRUEBA (--no-guardar): se llenará el formulario pero NO se guardará nada.\n")
     if LIMPIAR_DOCUMENTOS == "listar":
@@ -528,6 +648,7 @@ def main():
         print(f">>> --subir-documentos: {modo} los documentos de '{SUBIR_DOCUMENTOS}'.\n")
 
     df = cargar_excel(args.input, COLUMNAS_EXCEL_REQUERIDAS)
+    df = autocompletar_campos_negocio(df)
     print(f"Cargados {len(df)} colaboradores desde {args.input}")
 
     playwright, browser, page = conectar_a_chrome_existente()
@@ -535,6 +656,7 @@ def main():
 
     resultados: list[ResultadoFila] = []
     grupo_actual = None
+    docs_incompletos = 0  # filas a las que les falta algún doc del set estándar
 
     for i, fila in df.iterrows():
         rut = str(fila["RUT"]).strip()
@@ -587,38 +709,86 @@ def main():
                     # base; el proveedor hay que reseleccionarlo en la sig. fila.
                     grupo_actual = None
 
-            # Subida de documentos: si se pidió y la persona quedó en el sistema.
+            # Verificación de documentos (solo lectura): lista qué tipos ya
+            # tiene la persona, sin subir ni borrar nada. Paso previo pedido
+            # explícitamente para poder revisar antes de --subir-documentos
+            # (que de todas formas ya evita duplicar un tipo existente).
+            if VERIFICAR_DOCUMENTOS and resultado.estado != "ERROR":
+                try:
+                    accion_v, tipos_v = tipos_documentos_existentes(page, rut, proveedor)
+                    if accion_v == "sin_rut":
+                        nota_v = "Docs actuales: no se pudo abrir la vista (RUT no está en la grilla)"
+                    else:
+                        nota_v = (f"Docs actuales ({len(tipos_v)}): "
+                                  + (", ".join(tipos_v) if tipos_v else "ninguno"))
+                    resultado.detalle = (resultado.detalle + " | " + nota_v).strip(" |")
+                    print(f"   -> {nota_v}")
+                except Exception as e:
+                    resultado.detalle += f" | Docs verificar: ERROR: {e}"
+                    print(f"   -> Docs verificar: ERROR: {e}")
+                finally:
+                    grupo_actual = None
+
+            # Subida de documentos: si se pidió y la persona quedó en el sistema
+            # (o, en --no-guardar, habría quedado). 🔴 Antes solo incluía
+            # CREADO/EDITADO/SIN_CAMBIOS: con --no-guardar, una fila que SÍ
+            # necesitaba cambios sale como SIMULADO_EDITAR/SIMULADO_CREAR (no
+            # EDITADO/CREADO), así que la subida de documentos NUNCA se
+            # probaba para esas filas en modo prueba — solo para las que ya
+            # estaban SIN_CAMBIOS. Confirmado en vivo 08/09/2026.
             if (SUBIR_DOCUMENTOS
-                    and resultado.estado in ("CREADO", "EDITADO", "SIN_CAMBIOS")):
+                    and resultado.estado in (
+                        "CREADO", "EDITADO", "SIN_CAMBIOS",
+                        "SIMULADO_CREAR", "SIMULADO_EDITAR",
+                    )):
                 try:
                     carpeta, motivo = _buscar_carpeta_persona(
                         SUBIR_DOCUMENTOS, fila["NOMBRES"],
                         fila["apellidoPaterno"], fila["apellidoMaterno"])
                     if not carpeta:
-                        nota = f"Docs subir: {motivo}"
+                        nota = f"⚠ FALTAN TODOS los documentos: {motivo}"
+                        docs_incompletos += 1
                     else:
                         items, omitidos = preparar_items_carpeta(carpeta)
                         if not items:
-                            nota = ("Docs subir: la carpeta no tiene archivos válidos"
+                            nota = ("⚠ FALTAN TODOS los documentos: la carpeta no tiene archivos válidos"
                                     + (f" | omitidos: {omitidos}" if omitidos else ""))
+                            docs_incompletos += 1
                         else:
                             periodo = formatear_fecha(fila["fechaContratacion"])
                             vencimiento = formatear_fecha(fila["fechaTermino"])
-                            accion, subidos, errs = subir_documentos_trabajador(
+                            accion, subidos, ya_existian, errs = subir_documentos_trabajador(
                                 page, rut, proveedor, items, periodo,
                                 vencimiento_ddmmaaaa=vencimiento,
                                 guardar=(not NO_GUARDAR))
                             verbo = {"subido": "Docs SUBIDOS",
                                      "subido_con_periodo": "Docs SUBIDOS (hubo que completar Período)",
+                                     "sin_items_nuevos": "Docs: nada nuevo que subir",
                                      "rechazado": "Docs subir RECHAZADO por el sitio",
                                      "simulado": "Docs (simulado)",
                                      "sin_rut": "Docs subir: RUT no está en la grilla",
                                      "sin_items": "Docs subir: sin items"}.get(accion, accion)
                             nota = f"{verbo} ({len(subidos)}): " + (", ".join(subidos) or "ninguno")
+                            if ya_existian:
+                                nota += f" | ya tenía, no se re-subió ({len(ya_existian)}): " + ", ".join(ya_existian)
                             if omitidos:
                                 nota += f" | omitidos: {'; '.join(omitidos)}"
                             if errs:
                                 nota += f" | errores: {'; '.join(errs)}"
+
+                            # No bloquea nada (la persona igual se crea/edita y
+                            # se le suben los documentos que sí están) — solo
+                            # avisa en el reporte si falta alguno del set
+                            # estándar de 8. "Ya tenía" cuenta como presente
+                            # (no avisar por algo que ya está cargado de una
+                            # corrida anterior aunque no venga en esta carpeta).
+                            presentes_norm = {normalizar_texto(t) for t in (subidos + ya_existian)}
+                            faltantes = [t for t in DOCUMENTOS_SET_ESTANDAR
+                                         if normalizar_texto(t) not in presentes_norm]
+                            if faltantes:
+                                nota += (f" | ⚠ FALTAN documentos del set estándar ({len(faltantes)}): "
+                                         + ", ".join(faltantes))
+                                docs_incompletos += 1
                     resultado.detalle = (resultado.detalle + " | " + nota).strip(" |")
                     print(f"   -> {nota}")
                 except Exception as e:
@@ -671,6 +841,9 @@ def main():
     print(f"\nResumen: {total} procesados | Creados: {creados} | Editados: {editados} | "
           f"Simulados (--no-guardar): {simulados} | "
           f"Sin cambios: {sin_cambios} | Omitidos (Cargo): {omitidos} | Error: {errores}")
+    if SUBIR_DOCUMENTOS and docs_incompletos:
+        print(f"⚠ {docs_incompletos} persona(s) con documentos faltantes del set estándar "
+              f"— revisar el detalle de cada fila en {args.output}.")
 
     # En modo prueba dejamos el navegador y el formulario intactos para revisión.
     if not NO_GUARDAR:

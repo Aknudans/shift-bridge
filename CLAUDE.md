@@ -13,11 +13,14 @@ python -m playwright install chromium
 
 **Ejecutar el bot** (opción recomendada, un solo doble-click):
 ```
-ejecutar_bot.bat
+ejecutar_interfaz.bat
 ```
-Abre Chrome en modo depuración con un perfil separado (`--user-data-dir`), pausa
-para que inicies sesión manualmente la primera vez, pide el Excel de entrada
-(se puede arrastrar a la consola) y corre el script.
+Abre la interfaz gráfica (`interfaz.py`, ver sección 12.11): botón para abrir
+Chrome en modo depuración con perfil separado, selector de Excel/carpeta,
+3 modos (Comparación / Creación-edición / Subir documentos), log en vivo y
+barra de progreso. `ejecutar_bot.bat` (Fase 1 sola, consola con prompts) y
+`ejecutar_crear.bat` (Fase 2 sola, menú de consola) siguen funcionando para
+quien prefiera la consola.
 
 **Ejecutar el script directamente** (requiere Chrome ya abierto con
 `--remote-debugging-port=9222` y sesión iniciada — ver sección 8.2 y README.md):
@@ -559,11 +562,18 @@ abrir_chrome.bat        — SOLO abre el Chrome de depuración (puerto 9222,
                           ningún script. Usarlo antes de ejecutar
                           "python crear_o_editar.py ..." a mano con
                           --limpiar-documentos / --subir-documentos / --no-guardar.
-documentos.py           — módulo Fase 2 opcional: limpieza (--limpiar-documentos)
-                          y carga masiva (--subir-documentos) de documentos del
-                          trabajador. Ver secciones 12.8 y 12.9. NO se ejecuta
+documentos.py           — módulo Fase 2 opcional: limpieza (--limpiar-documentos),
+                          verificación (tipos_documentos_existentes) y carga
+                          masiva (--subir-documentos) de documentos del
+                          trabajador. Ver secciones 12.8-12.13. NO se ejecuta
                           solo, lo importa crear_o_editar.py.
-requirements.txt       — dependencias Python
+interfaz.py             — interfaz gráfica (customtkinter) de escritorio: elegir
+                          modo (Comparación / Creación-edición / Subir
+                          documentos), Excel y carpeta, botón "Abrir Chrome",
+                          log en vivo y barra de progreso. Corre los scripts
+                          como subproceso (no reimplementa su lógica). Ver 12.11.
+ejecutar_interfaz.bat   — launcher de un click para interfaz.py.
+requirements.txt       — dependencias Python (incluye customtkinter)
 README.md              — instrucciones de uso para el usuario final (no técnico)
 CLAUDE.md              — este archivo
 ```
@@ -1088,61 +1098,213 @@ CARPETA` en `crear_o_editar.py`, funciones en `documentos.py`:
 `22710691-3` (2 veces), verificado en la grilla, y después limpiado con
 `--limpiar-documentos borrar`.
 
-## 13. PENDIENTES — retomar 08/09/2026 (handoff próxima sesión)
+### 12.10 Autocompletado de negocio + verificación real de guardado (08/09/2026)
 
-Estado al cierre del 07/09/2026 (rama `carga-masiva`, sale de `Crear`).
-Pipeline `crear_o_editar.py` funcionando: crear/editar + `--no-guardar` +
-`--limpiar-documentos [listar|borrar]` + `--subir-documentos CARPETA`.
-`ejecutar_crear.bat` ahora es un menú (abre Chrome + elige modo).
-`abrir_chrome.bat` nuevo (solo abre el Chrome del 9222).
+Sesión de endurecimiento de `crear_o_editar.py`/`campos_formulario.py` a partir
+de datos reales del Excel que traían columnas vacías, y de una corrida real
+que reportó éxito sin haber guardado.
+
+- **`autocompletar_campos_negocio(df)`** (crear_o_editar.py), corre justo
+  después de `cargar_excel()`: si `fechaTermino` viene vacía, se calcula como
+  `fechaContratacion + 89 días` (misma regla de negocio de la Planilla
+  Agosto); si `sueldoBase` viene vacío, se interpreta como `0` (antes
+  quedaba como el string literal `"nan"` escrito tal cual en el campo Sueldo
+  Base — bug real, encontrado con un Excel de prueba de 2 filas). Deja una
+  nota en el reporte de cada fila afectada ("Fin Contrato autocompletado...",
+  "Sueldo Base autocompletado a 0...").
+- 🔴 **`verificar_guardado_exitoso()`** (campos_formulario.py), CRÍTICO: el
+  código anterior asumía éxito (`CREADO`/`EDITADO`) con solo hacer clic en
+  `#btnGuardar` y esperar `networkidle` — sin comprobar si el sitio realmente
+  guardó. ShiftLaboral no cambia de URL al guardar: si hay un error de
+  validación, el mismo formulario queda abierto en vez de avisar con una
+  excepción de Playwright. Ahora se confirma explícitamente tras cada
+  Guardar: (1) que no haya mensajes de error DevExpress visibles
+  (`.dxeErrorCell`/`.dxeValidationSummary`/clases con "Error"/"Warning"), y
+  (2) que `#btnGuardar` ya no esté visible (si sigue ahí, el guardado no se
+  aplicó). Si algo falla, se reporta `ERROR` con el motivo en vez de un falso
+  `CREADO`/`EDITADO`. En `crear_trabajador_nuevo` además hay una
+  **confirmación positiva**: tras pasar la verificación, se limpia el filtro
+  y se vuelve a buscar el RUT en la grilla — si no aparece, `ERROR` en vez de
+  asumir que se creó.
+- 🔴 **Popup "Operación Exitosa" tras Guardar — bug real y corregido en 2
+  pasadas.** ShiftLaboral muestra un popup modal "Operación Exitosa" con
+  botón "Aceptar" tras cada Guardar (mismo patrón que el borrado de
+  documentos, §12.8). Si no se cierra, su overlay tapa la página y CUALQUIER
+  clic posterior se cuelga 30s (síntoma reportado por el usuario: "produce un
+  loop en el que el programa no puede seguir progresando"). Fix en
+  `cerrar_popup_operacion_exitosa()` (campos_formulario.py), llamado justo
+  después de cada clic en `#btnGuardar` (y defensivamente dentro de
+  `cerrar_formulario()`). IDs CONFIRMADOS EN VIVO 08/09/2026 (RUT
+  `19439430-6`, edición real) para la grilla de **Trabajadores**:
+  `#btnExitoAceptar_grillaExternosProveedorTrabajadores` y variante `_2`
+  (mismo patrón `btnExitoAceptar_<grilla>[_2]` que ya existía para la grilla
+  de Documentos). 🔴 Una primera versión de la función (con polling corto de
+  `is_visible(timeout=500)`) SÍ falló en vivo una vez porque el popup apareció
+  un poco después de esa ventana — mismo patrón de bug de timing de
+  DevExpress ya documentado en 12.6 (`confirmar_proveedor_seleccionado`).
+  Fix definitivo: esperar EXPLÍCITAMENTE con
+  `page.wait_for_selector(state="visible")` a que aparezca alguno de los IDs
+  conocidos antes de intentar clickear. Verificado: el guardado se había
+  aplicado igual en el intento fallido (solo falló la detección del popup,
+  no el guardado — confirmado releyendo el sistema con `buscar_y_comparar.py`).
+
+### 12.11 Interfaz gráfica (`interfaz.py`, customtkinter) (08/09/2026)
+
+Implementada la app de escritorio pendiente en §13 (versión anterior): un
+`.py` con 3 modos elegibles (Comparación / Creación-edición / Subir
+documentos), selector de Excel y de reporte de salida, selector de carpeta de
+documentos (solo visible en modo "Subir documentos"), checkbox
+"--no-guardar", botón "Abrir Chrome de depuración" (mismo perfil/puerto que
+`abrir_chrome.bat`), log en vivo y barra de progreso (parseando las líneas
+`[i/N] ...` que ya imprimen los scripts). **No reimplementa la lógica de
+negocio**: corre `buscar_y_comparar.py`/`crear_o_editar.py` como subproceso
+(`sys.executable -u ...`) en un hilo aparte y muestra su stdout, para no
+duplicar/arriesgar romper la automatización ya probada. Launcher:
+`ejecutar_interfaz.bat`. Los flags `--limpiar-documentos` y
+`--verificar-documentos` (ver 12.12) todavía NO están expuestos en la
+interfaz, solo por CLI — pendiente si se necesitan seguido.
+
+### 12.12 Anti-duplicado y verificación de documentos existentes (08/09/2026)
+
+Hallazgo del usuario: nada impedía que `--subir-documentos` subiera los MISMOS
+documentos dos veces si se corría de nuevo sobre una persona ya procesada
+(sin validación de ese lado en el sitio). Fix en `documentos.py`:
+
+- **`tipos_documentos_existentes(page, rut, grupo_proveedor)`**: de solo
+  lectura, abre la vista de documentos y devuelve el tipo de TODOS los
+  documentos ya cargados (proveedor O mandante — a diferencia de
+  `limpiar_documentos_trabajador`, que solo lista los borrables). Expuesta en
+  `crear_o_editar.py` como flag independiente **`--verificar-documentos`**
+  (solo lectura, no sube ni borra nada) — el paso de "verificar antes de
+  agregar" pedido explícitamente por el usuario.
+- **`subir_documentos_trabajador(..., omitir_existentes=True)`** (default):
+  antes de abrir "Carga masiva documentos", lee los tipos ya existentes y
+  salta cualquier `item` cuyo tipo ya esté cargado. Nuevo valor de retorno
+  `ya_existian` (además de `subidos`/`errores` — la firma pasó de 3 a 4
+  elementos, actualizar cualquier código que la llame). Reportado en el
+  detalle de cada fila como "ya tenía, no se re-subió (N): ...", distinto de
+  "SUBIDOS (N): ...". Nuevo estado de acción `"sin_items_nuevos"` cuando todo
+  lo de la carpeta ya estaba cargado.
+- Refactor de soporte: los helpers internos de paginación/overlays de
+  `limpiar_documentos_trabajador` (`_esperar_sin_overlays`,
+  `_click_primero_visible`, `_cerrar_dialogo_abierto`, `_total_paginas`,
+  `_ir_a_pagina`) se subieron a nivel de módulo (antes anidados) para poder
+  reusarlos en `tipos_documentos_existentes`/`subir_documentos_trabajador`
+  sin duplicar código.
+- ✅ Validado en vivo (RUT `19439430-6`, Francisco Alvarez, sus 8 documentos
+  ya cargados): segunda corrida de `--subir-documentos` detectó los 8 tipos
+  existentes, no volvió a subir nada, y se confirmó contra el DOM que seguía
+  en exactamente 8 documentos (sin duplicados).
+
+### 12.13 Aviso de documentos faltantes del set estándar (08/09/2026)
+
+Pedido del usuario: si a una persona le faltan documentos de la carpeta, que
+NO bloquee el proceso (se crea/edita igual y se suben los que sí están), pero
+que quede advertido en el reporte.
+
+- **`DOCUMENTOS_SET_ESTANDAR`** (documentos.py): los 8 tipos que trae
+  normalmente la carpeta de un ingreso nuevo (Cédula de Identidad, Contrato
+  puesta a disposición, Contacto en caso de Emergencia, Toma de conocimiento
+  marca en biometrico (EST), Registro Entrega EPP, Registro de Capacitación
+  Uso EPP, Registro de Capacitación IRL (Ex Odi) Mandante, TC Reglamento
+  Interno RIOHS mandante).
+- Tras cada `--subir-documentos`, `crear_o_editar.py` compara
+  `subidos + ya_existian` contra ese set (así no avisa por algo que la
+  persona ya tenía cargado de una corrida anterior aunque no viniera en la
+  carpeta de esta vez) y agrega al detalle de la fila: `⚠ FALTAN documentos
+  del set estándar (N): ...`. El resumen final de consola cuenta cuántas
+  personas quedaron con documentos incompletos.
+- ✅ Validado en vivo: Ariel Díaz (carpeta con solo 5 de 8 archivos) quedó
+  marcado con "FALTAN (3): Cédula de Identidad, Contrato puesta a
+  disposición, Contacto en caso de Emergencia" — exactamente los que
+  faltaban en su carpeta real — mientras sus 5 documentos disponibles se
+  subieron igual. Francisco Alvarez (carpeta completa) no generó ninguna
+  advertencia.
+
+### 12.14 Bug "identidad-bloqueada" (§13 pendiente anterior, punto 6) — NO reproducido (08/09/2026)
+
+El pendiente decía que al "Crear" un RUT ya conocido por la plataforma (otro
+cliente), además de Nombres/Apellidos/Sexo (que correctamente quedan
+`readonly`), los combos AFP y Sistema de Salud tampoco se escribían y
+quedaban en su default ("Uno"/"Sin Información").
+
+**Se intentó reproducir en vivo el 08/09/2026** con el mismo RUT documentado
+originalmente (`22708167-8`, identidad de "Matias Ignacio", bloqueada) y la
+secuencia exacta de `crear_trabajador_nuevo()`: Sueldo Base → AFP → Isapre →
+Proveedor → confirmar → Cargo → Tienda. En cada paso, AFP y Sistema de Salud
+(seteados a "Habitat"/"Fonasa" de prueba) se mantuvieron correctos de
+principio a fin — el bug **no se reprodujo**. No se hizo clic en Guardar (no
+se modificó nada real), y el formulario se cerró con Cancelar al terminar.
+
+Conclusión: lo más probable es que este bug ya haya quedado resuelto como
+efecto colateral de otros fixes de timing hechos después de documentarlo
+(sección 12.10 de esta sesión, o el `wait_for_function` de
+`esperar_campos_formulario_editables`/la espera tras confirmar el RUT en
+"Crear"). **No se tocó código** para esto — agregar un fix especulativo sin
+un caso real que falle agrega riesgo sin beneficio comprobado. Queda como
+"posiblemente resuelto, confirmar en la próxima corrida real de lote grande
+sobre una identidad bloqueada" en vez de cerrado del todo.
+
+## 13. PENDIENTES — retomar próxima sesión (actualizado 08/09/2026)
+
+Estado al cierre del 08/09/2026 (rama `carga-masiva`, sale de `Crear`).
+Pipeline `crear_o_editar.py` funcionando y ENDURECIDO con datos y corridas
+reales: crear/editar + `--no-guardar` + `--limpiar-documentos [listar|borrar]`
++ `--subir-documentos CARPETA` (ahora anti-duplicado, ver 12.12) +
+`--verificar-documentos` (nuevo, solo lectura, ver 12.12). Autocompletado de
+Fin Contrato/Sueldo Base (12.10), verificación real de guardado y manejo del
+popup "Operación Exitosa" (12.10), aviso de documentos faltantes (12.13), e
+interfaz gráfica `interfaz.py` (12.11) ya implementados y validados en vivo.
+
+### Resueltos en esta sesión (ya no son pendientes)
+- ~~1. Verificar en vivo la carga masiva SIN Período~~ → CONFIRMADO: el sitio
+  SÍ rechaza el Período vacío; el fallback (completar y reintentar) funciona
+  y quedó validado en vivo (ver 12.10/12.12).
+- ~~2. Prueba end-to-end del pipeline completo~~ → hecho sobre 1-2 personas
+  reales (crear/editar + subir documentos, con y sin `--no-guardar`);
+  **falta todavía a mayor escala**, ver punto 1 nuevo más abajo.
+- ~~5. LA INTERFAZ (customtkinter)~~ → implementada (`interfaz.py` +
+  `ejecutar_interfaz.bat`), ver 12.11. Aún le faltan exponer
+  `--limpiar-documentos`/`--verificar-documentos` (hoy solo por CLI).
+- ~~6. Bug identidad-bloqueada (AFP/Isapre)~~ → **NO reproducido** en un
+  intento en vivo dedicado (ver 12.14). Probablemente ya resuelto como
+  efecto colateral de otros fixes de timing. Queda en observación, no en
+  pendiente activo — si reaparece en el lote grande (punto 1 de abajo),
+  retomar con el caso real en la mano.
 
 ### Prioridad ALTA
-1. **Verificar en vivo la carga masiva SIN Período.** El código deja el
-   Período vacío por defecto (`dejar_periodo_vacio=True`) con fallback
-   auto-completar+reintentar, pero **nunca se probó con sesión activa** (el
-   Chrome del 9222 quedó deslogueado). Correr `--subir-documentos` real con 1
-   persona con carpeta completa y ver si el reporte dice `Docs SUBIDOS`
-   (vacío OK) o `Docs SUBIDOS (hubo que completar Período)`.
-2. **Prueba end-to-end del pipeline completo** en corrida real: crear +
-   `--limpiar-documentos borrar` + `--subir-documentos` sobre 1-2 personas con
-   carpeta completa. Verificar contra el sitio.
-3. **Arreglar / completar `Ingresos Lunes 07-09-2026/`** (13 archivos de 0
-   bytes al cierre — el sitio los rechaza; 1 carpeta con <8 docs). El usuario
-   los está completando. Confirmar que estén los 8 del set estándar por
-   persona antes de correr `--subir-documentos` en serio.
-4. **Reconciliar `SHIFT.xlsx` (22 filas) vs carpeta de documentos (17
-   personas).** Decidir qué pasa con las que están en una y no en la otra.
+1. **Prueba end-to-end de un lote real MÁS GRANDE (5-10+ personas).** Todo lo
+   endurecido en 12.10-12.13 solo se probó con 1-2 personas por corrida. Los
+   bugs de timing/overlay de este sitio (varios ya documentados) tienden a
+   aparecer recién con iteraciones repetidas en un lote real, no en pruebas
+   puntuales. Correr crear/editar + `--subir-documentos` (+ opcionalmente
+   `--limpiar-documentos borrar` sobre alguna identidad preexistente) sobre
+   un lote grande y revisar el reporte fila por fila.
+2. **Reconciliar `SHIFT.xlsx` vs carpeta de documentos de cada lote.**
+   Confirmar que toda persona del Excel tenga carpeta de documentos y
+   viceversa antes de correr `--subir-documentos` en serio (la advertencia de
+   12.13 ayuda, pero es post-hoc, no una reconciliación previa).
 
 ### Prioridad MEDIA
-5. **LA INTERFAZ (customtkinter).** Ya decidido con el usuario:
-   - App de escritorio con `customtkinter` (1 dependencia nueva).
-   - Cubre TODO el pipeline en una sola app: elegir Excel + carpeta Docs,
-     elegir modo (comparar / crear-editar / limpiar docs / subir docs / prueba
-     sin guardar), botón Iniciar, **log en vivo**, **barra de progreso X/N**,
-     resumen final.
-   - **La app lanza el Chrome de depuración** (botón "Abrir Chrome", como el
-     `.bat`); el login sigue siendo manual.
-   - No empezada. Es el chunk grande que falta.
-6. **Bug identidad-bloqueada al "Crear"** (§12.7): cuando el RUT ya existe en
-   la plataforma, además de Nombres/Apellidos, los combos **AFP y Sistema de
-   Salud tampoco se escriben** (quedan en default "Uno" / "Sin Información").
-   La edición siguiente lo corrige, pero convendría que quede bien a la
-   primera.
-7. **Completar `_MAPEO_NOMBRE_TIPO`** (`documentos.py`) para archivos que
-   aparezcan en otras carpetas y no estén cubiertos (hoy solo el set de
-   `Adan_Leon`: 8 tipos). Ir agregando patrones a medida que aparezcan.
+3. **Completar `_MAPEO_NOMBRE_TIPO`** (`documentos.py`) para archivos que
+   aparezcan en otras carpetas y no estén cubiertos (hoy cubre el set
+   estándar de 8 confirmado en "Adan_Leon"/"Ariel_Diaz"/"Francisco_Alvarez").
+   Ir agregando patrones a medida que aparezcan.
+4. **Exponer `--limpiar-documentos` y `--verificar-documentos` en
+   `interfaz.py`** (hoy solo por CLI, ver 12.11).
 
 ### Prioridad BAJA / a revisar
-8. **Período de tipos Mensual/Anual** (Liquidaciones, EPP anual): para tipos
+5. **Período de tipos Mensual/Anual** (Liquidaciones, EPP anual): para tipos
    "1 sola vez" el sitio fija el Período a `04/01/1990` ignore lo que se
    ponga; sin verificar qué hace con Mensual/Anual. Si el negocio necesita el
    período correcto ahí, investigar.
-9. **Ramas / merge.** Estamos en `carga-masiva` ← `Crear` ← `main`. Decidir
-   cuándo mergear `carga-masiva` → `Crear` y eventualmente a `main`.
-10. **`SHIFT.xlsx`**: versionado como TEMPLATE vacío (excepción `!SHIFT.xlsx`
-    en `.gitignore`). El archivo local con datos reales NUNCA se commitea —
-    `git update-index --skip-worktree SHIFT.xlsx` si molesta en `git status`.
-    Backup local de datos: `SHIFT.datos.local.xlsx`.
+6. **Ramas / merge.** Estamos en `carga-masiva` ← `Crear` ← `main`. El trabajo
+   de esta sesión se mergeó `carga-masiva` → `Crear` (ver commit del
+   08/09/2026); decidir cuándo mergear `Crear` → `main`.
+7. **`SHIFT.xlsx`**: versionado como TEMPLATE vacío (excepción `!SHIFT.xlsx`
+   en `.gitignore`). El archivo local con datos reales NUNCA se commitea —
+   `git update-index --skip-worktree SHIFT.xlsx` si molesta en `git status`.
+   Backup local de datos: `SHIFT.datos.local.xlsx`.
 
 ### Cómo dejar el entorno para retomar
 - Abrir Chrome: `abrir_chrome.bat` (o `ejecutar_crear.bat`), iniciar sesión en

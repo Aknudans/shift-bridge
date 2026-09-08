@@ -31,6 +31,7 @@ from playwright.sync_api import Page
 
 from shift_common import (
     BASE_URL,
+    normalizar_texto,
     seleccionar_grupo_proveedor,
     buscar_rut,
 )
@@ -85,6 +86,83 @@ def _abrir_vista_documentos(page: Page, rut: str, grupo_proveedor: str) -> bool:
     return True
 
 
+def _esperar_sin_overlays(page: Page):
+    """Espera a que no haya overlays interceptando clics: el de carga de la
+    grilla (`dxgvLoadingDiv`), el backdrop de modal jQuery UI
+    (`.ui-widget-overlay`), o el de DevExpress (`.dxpcModalBackground`)."""
+    try:
+        page.wait_for_function(
+            """() => {
+                const ld = document.getElementById('grillaExternosDocumentosTrabajador_LD');
+                if (ld && ld.offsetParent !== null) return false;
+                const tapa = Array.from(document.querySelectorAll(
+                    '.ui-widget-overlay, [class*="dxpcModalBackground"], .modalExternos'))
+                    .some(e => e.offsetParent !== null);
+                return !tapa;
+            }""",
+            timeout=10000,
+        )
+    except Exception:
+        pass
+    time.sleep(0.3)
+
+
+def _click_primero_visible(page: Page, selectores, timeout=3000) -> bool:
+    """Clickea el primero de `selectores` que esté visible. Devuelve True si
+    clickeó alguno."""
+    for sel in selectores:
+        try:
+            loc = page.locator(sel)
+            if loc.count() and loc.first.is_visible():
+                loc.first.click(timeout=timeout)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _cerrar_dialogo_abierto(page: Page):
+    """Si quedó un diálogo (éxito/error/confirmación) abierto de una
+    iteración anterior, lo cierra para no bloquear el próximo clic."""
+    _click_primero_visible(page, [
+        "#btnExitoAceptar_grillaExternosDocumentosTrabajador_2",
+        "#btnExitoAceptar_grillaExternosDocumentosTrabajador",
+        "#btnBorrarNoExitosoAceptar_2",
+        "#btnBorrarNoExitosoAceptar",
+        "#btnConfirmacionBorrarCancelar_2",
+        "#btnConfirmacionBorrarCancelar",
+    ])
+
+
+def _total_paginas(page: Page) -> int:
+    try:
+        m = page.evaluate(
+            r"""() => { const t = document.body.innerText.match(/P.gina\s+\d+\s+de\s+(\d+)/);
+                        return t ? parseInt(t[1]) : 1; }"""
+        )
+        return max(1, int(m))
+    except Exception:
+        return 1
+
+
+def _ir_a_pagina(page: Page, n: int) -> bool:
+    """Navega el pager de la grilla de documentos a la página n."""
+    clic = page.evaluate(
+        """(n) => {
+            const cont = document.getElementById('grillaExternosDocumentosTrabajador');
+            if (!cont) return false;
+            const a = Array.from(cont.querySelectorAll('a'))
+                .find(x => x.offsetParent !== null && x.textContent.trim() === String(n));
+            if (a) { a.click(); return true; }
+            return false;
+        }""",
+        n,
+    )
+    page.wait_for_load_state("networkidle")
+    _esperar_sin_overlays(page)
+    return clic
+
+
 def limpiar_documentos_trabajador(
     page: Page, rut: str, grupo_proveedor: str, borrar: bool = False
 ) -> tuple[str, list[str]]:
@@ -101,83 +179,11 @@ def limpiar_documentos_trabajador(
     if not _abrir_vista_documentos(page, rut, grupo_proveedor):
         return ("sin_rut", [])
 
-    def _esperar_sin_overlays():
-        """Espera a que no haya overlays interceptando clics: el de carga de la
-        grilla (`dxgvLoadingDiv`), el backdrop de modal jQuery UI
-        (`.ui-widget-overlay`), o el de DevExpress (`.dxpcModalBackground`)."""
-        try:
-            page.wait_for_function(
-                """() => {
-                    const ld = document.getElementById('grillaExternosDocumentosTrabajador_LD');
-                    if (ld && ld.offsetParent !== null) return false;
-                    const tapa = Array.from(document.querySelectorAll(
-                        '.ui-widget-overlay, [class*="dxpcModalBackground"], .modalExternos'))
-                        .some(e => e.offsetParent !== null);
-                    return !tapa;
-                }""",
-                timeout=10000,
-            )
-        except Exception:
-            pass
-        time.sleep(0.3)
-
-    def _click_primero_visible(selectores, timeout=3000):
-        """Clickea el primero de `selectores` que esté visible. Devuelve True
-        si clickeó alguno."""
-        for sel in selectores:
-            try:
-                loc = page.locator(sel)
-                if loc.count() and loc.first.is_visible():
-                    loc.first.click(timeout=timeout)
-                    return True
-            except Exception:
-                continue
-        return False
-
-    def _cerrar_dialogo_abierto():
-        """Si quedó un diálogo (éxito/error/confirmación) abierto de una
-        iteración anterior, lo cierra para no bloquear el próximo clic."""
-        _click_primero_visible([
-            "#btnExitoAceptar_grillaExternosDocumentosTrabajador_2",
-            "#btnExitoAceptar_grillaExternosDocumentosTrabajador",
-            "#btnBorrarNoExitosoAceptar_2",
-            "#btnBorrarNoExitosoAceptar",
-            "#btnConfirmacionBorrarCancelar_2",
-            "#btnConfirmacionBorrarCancelar",
-        ])
-
-    def _total_paginas():
-        try:
-            m = page.evaluate(
-                r"""() => { const t = document.body.innerText.match(/P.gina\s+\d+\s+de\s+(\d+)/);
-                            return t ? parseInt(t[1]) : 1; }"""
-            )
-            return max(1, int(m))
-        except Exception:
-            return 1
-
-    def _ir_a_pagina(n):
-        """Navega el pager de la grilla de documentos a la página n."""
-        clic = page.evaluate(
-            """(n) => {
-                const cont = document.getElementById('grillaExternosDocumentosTrabajador');
-                if (!cont) return false;
-                const a = Array.from(cont.querySelectorAll('a'))
-                    .find(x => x.offsetParent !== null && x.textContent.trim() === String(n));
-                if (a) { a.click(); return true; }
-                return false;
-            }""",
-            n,
-        )
-        page.wait_for_load_state("networkidle")
-        _esperar_sin_overlays()
-        return clic
-
     def _pagina_con_borrable():
         """Recorre las páginas y se queda en la primera que tenga un icono
         'borrar'. Devuelve True si encontró alguna, False si no queda ninguna."""
-        for pg_n in range(1, _total_paginas() + 1):
-            _ir_a_pagina(pg_n)
+        for pg_n in range(1, _total_paginas(page) + 1):
+            _ir_a_pagina(page, pg_n)
             if page.locator(SEL_BORRAR).count() > 0:
                 return True
         return False
@@ -185,8 +191,8 @@ def limpiar_documentos_trabajador(
     # --- modo LISTAR: recorre todas las páginas, no borra nada ---
     if not borrar:
         vistos: list[str] = []
-        for pg_n in range(1, _total_paginas() + 1):
-            _ir_a_pagina(pg_n)
+        for pg_n in range(1, _total_paginas(page) + 1):
+            _ir_a_pagina(page, pg_n)
             vistos.extend(page.evaluate(_JS_LISTAR))
         page.goto(BASE_URL)
         page.wait_for_load_state("networkidle")
@@ -196,8 +202,8 @@ def limpiar_documentos_trabajador(
     guarda = 0
     repetidos = 0
     while guarda < 300:
-        _cerrar_dialogo_abierto()
-        _esperar_sin_overlays()
+        _cerrar_dialogo_abierto(page)
+        _esperar_sin_overlays(page)
         if not _pagina_con_borrable():
             break
         guarda += 1
@@ -216,7 +222,7 @@ def limpiar_documentos_trabajador(
         page.locator(SEL_BORRAR).first.click(timeout=8000)
         # 1) popup "¿Está seguro de borrar el documento?" -> Aceptar
         page.wait_for_selector(SEL_CONFIRMAR, state="visible", timeout=6000)
-        _click_primero_visible([SEL_CONFIRMAR + "_2", SEL_CONFIRMAR], timeout=5000)
+        _click_primero_visible(page, [SEL_CONFIRMAR + "_2", SEL_CONFIRMAR], timeout=5000)
         page.wait_for_load_state("networkidle")
         # 2) popup "Operación exitosa ... Aceptar" (o el de error) -> Aceptar
         try:
@@ -225,7 +231,7 @@ def limpiar_documentos_trabajador(
                 state="visible", timeout=6000)
         except Exception:
             pass
-        _click_primero_visible([
+        _click_primero_visible(page, [
             "#btnExitoAceptar_grillaExternosDocumentosTrabajador_2",
             "#btnExitoAceptar_grillaExternosDocumentosTrabajador",
             "#btnBorrarNoExitosoAceptar_2",
@@ -235,10 +241,55 @@ def limpiar_documentos_trabajador(
         time.sleep(0.6)
         borrados.append(etiqueta)
 
-    _cerrar_dialogo_abierto()
+    _cerrar_dialogo_abierto(page)
     page.goto(BASE_URL)
     page.wait_for_load_state("networkidle")
     return ("borrado", borrados)
+
+
+# Extrae el texto de la columna "Tipo" (índice 2: 0=nro fila, 1=marca,
+# 2=tipo) de CADA fila de documento — sin filtrar por si tiene icono
+# "borrar" o no, a diferencia de _JS_LISTAR. Se usa para saber qué tipos ya
+# están cargados (los suba el proveedor o el mandante), y así no re-subir un
+# tipo que ya existe. Confirmado en vivo 08/09/2026 (RUT 19439430-6).
+_JS_LISTAR_TIPOS = """() => Array.from(document.querySelectorAll('tr.dxgvDataRow')).map(r => {
+    const tds = Array.from(r.querySelectorAll('td')).map(t => t.textContent.trim());
+    return tds[2] || '';
+}).filter(Boolean)"""
+
+
+def _leer_tipos_en_vista_abierta(page: Page) -> list[str]:
+    """Asume que la vista de documentos YA está abierta (llamada interna de
+    `tipos_documentos_existentes` y `subir_documentos_trabajador`, para no
+    navegar dos veces). Recorre todas las páginas y devuelve el texto de la
+    columna Tipo de cada fila."""
+    _cerrar_dialogo_abierto(page)
+    _esperar_sin_overlays(page)
+    tipos: list[str] = []
+    for pg_n in range(1, _total_paginas(page) + 1):
+        _ir_a_pagina(page, pg_n)
+        tipos.extend(page.evaluate(_JS_LISTAR_TIPOS))
+    return tipos
+
+
+def tipos_documentos_existentes(page: Page, rut: str, grupo_proveedor: str) -> tuple[str, list[str]]:
+    """Abre la vista de documentos de `rut` y devuelve el tipo de TODOS los
+    documentos ya cargados (subidos por el proveedor O por el mandante — a
+    diferencia de `limpiar_documentos_trabajador`, que solo lista los
+    borrables). Es de solo lectura: no sube ni borra nada.
+
+    Se usa como paso de "verificación" (independiente, antes de subir nada) y
+    también internamente en `subir_documentos_trabajador` para no volver a
+    subir un tipo que la persona ya tiene.
+
+    Devuelve (accion, tipos) donde accion es "listado" | "sin_rut".
+    """
+    if not _abrir_vista_documentos(page, rut, grupo_proveedor):
+        return ("sin_rut", [])
+    tipos = _leer_tipos_en_vista_abierta(page)
+    page.goto(BASE_URL)
+    page.wait_for_load_state("networkidle")
+    return ("listado", tipos)
 
 
 # ===========================================================================
@@ -283,6 +334,22 @@ CATALOGO_TIPOS_DOCUMENTO = [
     "Toma de conocimiento marca en biometrico (EST)",
     "Anexos de contrato personal EST",
     "Comprobante de Entrevista del personal EST y OUT",
+]
+
+# Set estándar de ingreso: los 8 documentos que trae normalmente cada carpeta
+# de un colaborador nuevo (confirmado en vivo con las carpetas "Adan_Leon",
+# "Ariel_Diaz" y "Francisco_Alvarez", ver CLAUDE.md §12.9). Sirve para avisar
+# en el reporte cuándo a alguien le faltan documentos — sin bloquear el resto
+# del proceso: la persona igual se crea/edita y se le suben los que sí están.
+DOCUMENTOS_SET_ESTANDAR = [
+    "Cédula de Identidad",
+    "Contrato puesta a disposición",
+    "Contacto en caso de Emergencia",
+    "Toma de conocimiento marca en biometrico (EST)",
+    "Registro Entrega EPP",
+    "Registro de Capacitación Uso EPP",
+    "Registro de Capacitación IRL (Ex Odi) Mandante",
+    "TC Reglamento Interno RIOHS mandante",
 ]
 
 SEL_BTN_CM = "#btnDocumentosMasivos_2"
@@ -459,6 +526,7 @@ def subir_documentos_trabajador(
     page: Page, rut: str, grupo_proveedor: str,
     items, periodo_ddmmaaaa: str, vencimiento_ddmmaaaa: str = "",
     guardar: bool = True, dejar_periodo_vacio: bool = True,
+    omitir_existentes: bool = True,
 ):
     """Sube `items` ([{ruta, nombre, tipo}]) al trabajador `rut` vía la carga
     masiva.
@@ -467,36 +535,60 @@ def subir_documentos_trabajador(
       dejan VACÍO en la carga masiva, así que por defecto
       (`dejar_periodo_vacio=True`) NO se llena; solo se completa si el sitio
       rechaza el Guardar con "Debe completar los campos vacíos" (fallback
-      auto — comportamiento inferido, sin verificar en vivo que el sitio
-      acepte Período vacío).
+      auto, CONFIRMADO EN VIVO 08/09/2026: el sitio SÍ rechaza el Período
+      vacío, el reintento con Período completo funcionó).
     - `vencimiento_ddmmaaaa`: "Fecha de vencimiento". El sitio SÍ la exige
       (probado); si viene vacía se usa `periodo_ddmmaaaa`.
+    - `omitir_existentes` (default True): 🔴 antes de subir, lee TODOS los
+      tipos de documento que la persona YA tiene (proveedor o mandante, ver
+      `tipos_documentos_existentes`) y salta cualquier `item` cuyo tipo ya
+      esté cargado — sin esto, correr `--subir-documentos` dos veces sobre la
+      misma persona la dejaba con documentos DUPLICADOS (no hay ninguna
+      validación de ese lado en el sitio). Pasar False solo si de verdad se
+      quiere forzar la re-subida de todo.
 
     guardar=False -> llena el formulario pero hace Cancelar (modo prueba).
 
-    Devuelve (accion, subidos, errores):
+    Devuelve (accion, subidos, ya_existian, errores):
       accion = "subido" | "subido_con_periodo" | "simulado" | "sin_rut" |
-               "sin_items" | "rechazado"
+               "sin_items" | "sin_items_nuevos" | "rechazado"
+      ya_existian = tipos que se saltearon por ya estar cargados
     """
     if not items:
-        return ("sin_items", [], [])
+        return ("sin_items", [], [], [])
     if not _abrir_vista_documentos(page, rut, grupo_proveedor):
-        return ("sin_rut", [], [])
+        return ("sin_rut", [], [], [])
+
+    ya_existian: list[str] = []
+    items_a_subir = items
+    if omitir_existentes:
+        tipos_actuales_norm = {normalizar_texto(t) for t in _leer_tipos_en_vista_abierta(page)}
+        items_a_subir = []
+        for it in items:
+            if normalizar_texto(it["tipo"]) in tipos_actuales_norm:
+                ya_existian.append(it["tipo"])
+            else:
+                items_a_subir.append(it)
+
+    if not items_a_subir:
+        page.goto(BASE_URL)
+        page.wait_for_load_state("networkidle")
+        return ("sin_items_nuevos", [], ya_existian, [])
 
     errores = []
     page.locator(SEL_BTN_CM).first.click(timeout=8000)
     page.wait_for_selector(SEL_CM_FILE, state="attached", timeout=8000)
     time.sleep(0.5)
 
-    page.set_input_files(SEL_CM_FILE, [it["ruta"] for it in items])
+    page.set_input_files(SEL_CM_FILE, [it["ruta"] for it in items_a_subir])
     try:
-        page.wait_for_selector(f"#cboTipoDocumentos_{len(items) - 1}", timeout=10000)
+        page.wait_for_selector(f"#cboTipoDocumentos_{len(items_a_subir) - 1}", timeout=10000)
     except Exception:
         errores.append("no aparecieron todas las filas de archivos tras seleccionarlos")
     time.sleep(0.8)
 
     subidos = []
-    for n, it in enumerate(items):
+    for n, it in enumerate(items_a_subir):
         try:
             page.fill(f"#nombre_documento_masivo_{n}", it["nombre"], timeout=4000)
         except Exception:
@@ -519,14 +611,14 @@ def subir_documentos_trabajador(
             pass
         page.goto(BASE_URL)
         page.wait_for_load_state("networkidle")
-        return ("simulado", subidos, errores)
+        return ("simulado", subidos, ya_existian, errores)
 
     accion = "subido"
     if not _guardar_carga_masiva(page):
         # El sitio pidió completar campos. Si habíamos dejado el Período
         # vacío, lo llenamos ahora (con `periodo_ddmmaaaa`) y reintentamos.
         if dejar_periodo_vacio and periodo_ddmmaaaa:
-            for n in range(len(items)):
+            for n in range(len(items_a_subir)):
                 _set_periodo(page, n, periodo_ddmmaaaa, campo="calendario_documento_masivo")
             if _guardar_carga_masiva(page):
                 accion = "subido_con_periodo"
@@ -544,4 +636,4 @@ def subir_documentos_trabajador(
 
     page.goto(BASE_URL)
     page.wait_for_load_state("networkidle")
-    return (accion, subidos, errores)
+    return (accion, subidos, ya_existian, errores)

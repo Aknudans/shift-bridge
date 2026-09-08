@@ -23,16 +23,173 @@ SELECTOR_BTN_CANCELAR = "#btnCancelar"
 ID_FRAGMENTO_CONFIRMAR_PROVEEDOR = "btnCargarClientesCategoria"
 
 
+# Ids CONFIRMADOS EN VIVO 08/09/2026 (RUT 19439430-6, edición real con
+# --subir-documentos) para el popup "Operación Exitosa" de la grilla de
+# Trabajadores — mismo patrón "btnExitoAceptar_<grilla>[_2]" que ya estaba
+# confirmado para la grilla de Documentos (documentos.py), solo cambia el
+# nombre de la grilla.
+IDS_POPUP_EXITO_TRABAJADORES = (
+    "btnExitoAceptar_grillaExternosProveedorTrabajadores_2",
+    "btnExitoAceptar_grillaExternosProveedorTrabajadores",
+)
+
+
+def cerrar_popup_operacion_exitosa(page: Page, timeout_ms: int = 8000) -> bool:
+    """Cierra el popup modal "Operación Exitosa ... Aceptar" que ShiftLaboral
+    muestra tras Guardar (mismo patrón ya visto al borrar documentos, ver
+    documentos.py `_cerrar_dialogo_abierto`).
+
+    🔴 CRÍTICO no omitir esto: si el popup queda sin cerrar, su overlay
+    (`.ui-widget-overlay`) tapa toda la página y CUALQUIER clic posterior
+    (Cancelar, buscar el siguiente RUT, etc.) se cuelga esperando un
+    elemento tapado — el lote entero queda trabado en la misma fila.
+
+    🔴 BUG CONFIRMADO Y CORREGIDO 08/09/2026: una primera versión de esta
+    función buscaba el botón con un polling corto (`is_visible(timeout=500)`
+    por iteración) apenas terminaba `networkidle` + un `sleep(0.5)` externo.
+    En una corrida real (RUT 19439430-6) el popup SÍ apareció pero un poco
+    más tarde que esa ventana — mismo patrón de bug ya documentado en
+    CLAUDE.md 12.6 (`confirmar_proveedor_seleccionado`: "networkidle" no es
+    señal fiable de que terminó un callback de DevExpress). El resultado fue
+    que `verificar_guardado_exitoso` encontró `#btnGuardar` tapado por el
+    overlay y reportó ERROR pese a que el guardado sí había funcionado, y
+    encima el overlay sin cerrar hizo colgarse (timeout de 30s) el clic
+    siguiente sobre el filtro de RUT. Fix: esperar EXPLÍCITAMENTE con
+    `wait_for_selector(state="visible")` a que aparezca alguno de los ids
+    conocidos antes de intentar clickear, en vez de un polling corto.
+    """
+    selector_conocidos = ", ".join(f"#{i}" for i in IDS_POPUP_EXITO_TRABAJADORES)
+    try:
+        page.wait_for_selector(selector_conocidos, state="visible", timeout=timeout_ms)
+    except Exception:
+        pass  # puede que esta vez no haya aparecido ningún popup (ej. SIN_CAMBIOS)
+
+    cerrado = False
+    for _ in range(3):  # por si queda más de un popup apilado
+        boton = None
+        for id_ in IDS_POPUP_EXITO_TRABAJADORES:
+            loc = page.locator(f"#{id_}")
+            try:
+                if loc.count() and loc.first.is_visible(timeout=500):
+                    boton = loc.first
+                    break
+            except Exception:
+                pass
+
+        if boton is None:
+            # Fallback genérico por si aparece en otra grilla con otro id.
+            for selector in ('[id^="btnExitoAceptar"]', '[id*="Exito"][id*="Aceptar"]'):
+                loc = page.locator(selector)
+                try:
+                    cantidad = loc.count()
+                except Exception:
+                    cantidad = 0
+                if cantidad > 0:
+                    candidato = loc.last if cantidad > 1 else loc.first
+                    try:
+                        if candidato.is_visible(timeout=500):
+                            boton = candidato
+                            break
+                    except Exception:
+                        pass
+
+        if boton is None:
+            try:
+                hay_popup = page.evaluate(
+                    """() => Array.from(document.querySelectorAll('*')).some(e =>
+                        e.offsetParent !== null
+                        && /operaci[oó]n\\s+exitosa/i.test(e.textContent || '')
+                    )"""
+                )
+            except Exception:
+                hay_popup = False
+            if hay_popup:
+                candidato = page.locator("text=Aceptar").last
+                try:
+                    if candidato.is_visible(timeout=500):
+                        boton = candidato
+                except Exception:
+                    pass
+
+        if boton is None:
+            break
+
+        try:
+            boton.click(timeout=2000)
+            cerrado = True
+            page.wait_for_timeout(400)
+        except Exception:
+            break
+
+    return cerrado
+
+
 def cerrar_formulario(page: Page):
     """Cierra cualquier vista/formulario abierto (editar, ver o crear) con el
     botón Cancelar, sin guardar. CRÍTICO no omitir esto entre filas — ver
     CLAUDE.md sección 6 Paso 11 (bug de fila "pegada" en modo edición)."""
+    cerrar_popup_operacion_exitosa(page, timeout_ms=1500)
     try:
         page.locator(SELECTOR_BTN_CANCELAR).click(timeout=3000)
         page.wait_for_load_state("networkidle")
         time.sleep(0.3)
     except Exception:
         pass
+
+
+def verificar_guardado_exitoso(page: Page, timeout: int = 4000) -> tuple[bool, str]:
+    """Tras hacer clic en Guardar, confirma si el sitio realmente aplicó el
+    cambio, en vez de asumirlo por default.
+
+    ShiftLaboral no navega a otra URL al guardar: si hay un error de
+    validación (campo obligatorio vacío, formato inválido, etc.) el propio
+    formulario se queda abierto mostrando el error en vez de volver a la
+    grilla. Se usan dos señales, cualquiera de las dos basta para reportar
+    que el guardado NO se confirmó:
+      1) Mensajes de validación visibles en el DOM (clases DevExpress típicas
+         de error: dxeErrorCell / dxeValidationSummary / dxWarning, o
+         cualquier elemento con esas palabras en class y visible).
+      2) El propio botón Guardar (#btnGuardar) sigue presente y visible — si
+         el guardado hubiera funcionado, el formulario se cierra y la grilla
+         vuelve a su estado normal.
+    """
+    try:
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+    try:
+        mensajes_error = page.evaluate(
+            """() => {
+                const sels = ['.dxeErrorCell', '.dxeValidationSummary',
+                              '[class*="Error"]', '[class*="Warning"]'];
+                const textos = new Set();
+                sels.forEach(sel => {
+                    document.querySelectorAll(sel).forEach(e => {
+                        if (e.offsetParent !== null) {
+                            const t = (e.textContent || e.title || '').trim();
+                            if (t) textos.add(t);
+                        }
+                    });
+                });
+                return Array.from(textos);
+            }"""
+        )
+    except Exception:
+        mensajes_error = []
+
+    if mensajes_error:
+        return False, "Errores de validación del sitio: " + "; ".join(mensajes_error)
+
+    try:
+        formulario_sigue_abierto = page.locator("#btnGuardar").is_visible(timeout=timeout)
+    except Exception:
+        formulario_sigue_abierto = False
+
+    if formulario_sigue_abierto:
+        return False, "El formulario de Guardar sigue abierto tras el clic; no se confirmó el guardado."
+
+    return True, ""
 
 
 def esperar_campos_formulario_editables(page: Page, timeout: int = 15000):
