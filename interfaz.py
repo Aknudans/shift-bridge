@@ -54,6 +54,90 @@ def _buscar_chrome() -> str:
             return ruta
     return ""
 
+# El texto de la ventana de ayuda, separado del código que la dibuja para
+# poder corregirlo sin tocar la interfaz. Cada sección es un título y sus
+# párrafos; los que empiezan con ⚠ se muestran resaltados.
+AYUDA = [
+    ("Antes de empezar", [
+        "Apretar «Abrir Chrome de depuración» e iniciar sesión a mano en la ventana "
+        "que se abre. Alcanza con hacerlo una vez por jornada: esa ventana hay que "
+        "dejarla abierta mientras el bot trabaja.",
+        "El bot nunca ve ni guarda la contraseña.",
+        "⚠ ShiftLaboral permite una sola sesión por usuario. Si alguien más entra con "
+        "la misma cuenta, la sesión de acá se cae y el bot se corta a la mitad. No "
+        "correr dos computadores con el mismo usuario al mismo tiempo.",
+    ]),
+    ("Los tres modos", [
+        "Comparación: solo mira. Busca cada RUT y compara lo que hay en el sistema "
+        "contra el Excel. No modifica absolutamente nada. Sirve para revisar antes "
+        "de tocar algo.",
+        "Creación / edición: si la persona ya está, corrige solo los campos que no "
+        "coinciden y deja el resto intacto. Si no está, la crea con los datos del "
+        "Excel.",
+        "Subir documentos: hace lo mismo que el anterior y además le sube a cada "
+        "persona los documentos de su carpeta. Nunca sube un tipo de documento que "
+        "la persona ya tenga cargado, así que se puede correr de nuevo sin duplicar.",
+        "⚠ Si el cargo escrito en el Excel no coincide exactamente con alguno del "
+        "catálogo del sitio, esa persona se omite entera: no se le toca ningún "
+        "campo. Queda anotada en el reporte como OMITIDO_CARGO.",
+    ]),
+    ("El Excel", [
+        "Se usa la primera hoja, con los encabezados de la planilla de siempre: el "
+        "bloque se pega tal cual, sin reordenar columnas.",
+        "Si la fecha de término viene vacía, se calcula como la de inicio más 89 "
+        "días. Si el sueldo viene vacío, se toma como 0. En ambos casos queda "
+        "aclarado en el reporte.",
+        "El RUT puede ir con puntos o sin ellos, da igual.",
+    ]),
+    ("La carpeta de documentos", [
+        "Adentro va una subcarpeta por persona, con su nombre (por ejemplo "
+        "«Adan_Leon»), y dentro de cada una sus archivos.",
+        "El nombre del archivo es lo que decide qué tipo de documento es. Se "
+        "reconocen las abreviaturas habituales, así que no hace falta renombrarlos.",
+        "Si un archivo no se reconoce, se omite ese archivo solo y queda avisado en "
+        "el reporte; los demás se suben igual. Lo mismo si a alguien le falta algún "
+        "documento del set habitual: no frena nada, solo queda la advertencia.",
+    ]),
+    ("Las opciones", [
+        "Modo prueba: llena todos los formularios pero no aprieta Guardar. Sirve "
+        "para ver qué haría el bot antes de dejarlo hacerlo.",
+        "Anotar qué documentos tiene: agrega al reporte la lista de lo que cada "
+        "persona ya tiene cargado. No sube ni borra nada.",
+        "Documentos anteriores: qué hacer con los documentos que el proveedor le "
+        "subió antes a alguien que ya existía. «Solo anotarlos» los lista sin "
+        "tocarlos; «Borrarlos» los elimina de verdad.",
+        "⚠ El modo prueba NO protege el borrado de documentos. Si se elige "
+        "«Borrarlos», se borran igual y no se pueden recuperar. Los documentos "
+        "cargados por el mandante nunca se tocan.",
+    ]),
+    ("Mientras corre", [
+        "El recuadro de abajo va mostrando en qué persona está y qué le hizo. La "
+        "barra avanza a medida que termina cada una.",
+        "Si una persona falla, queda anotado el error y el bot sigue con la "
+        "siguiente. Nunca se detiene el lote entero por una sola.",
+        "⚠ El botón rojo «Cancelar proceso» corta todo al instante. Puede dejar un "
+        "formulario a medio llenar en el sitio, y el reporte final no se genera: "
+        "solo queda lo que se ve en el recuadro. Usarlo únicamente si algo va mal.",
+    ]),
+    ("El reporte", [
+        "Se guarda donde diga «Reporte de salida», con una fila por persona y un "
+        "color según cómo salió: verde si se hizo, amarillo si se omitió, rojo si "
+        "hubo error.",
+        "La columna de detalle explica qué pasó en cada caso: qué campos cambiaron, "
+        "qué documentos se subieron, qué faltó.",
+        "Si el archivo del reporte está abierto en Excel, se guarda con otro nombre "
+        "en vez de perderse.",
+    ]),
+    ("Si algo falla", [
+        "«No se pudo conectar a Chrome»: la ventana de depuración se cerró o nunca "
+        "se abrió. Apretar de nuevo «Abrir Chrome de depuración» y no cerrar esa "
+        "ventana.",
+        "Si el sitio pide login a mitad de una corrida, es la sesión que se cayó "
+        "sola. Iniciar sesión de nuevo en esa ventana y volver a correr: lo que ya "
+        "se hizo queda hecho, y lo que estaba bien no se vuelve a tocar.",
+    ]),
+]
+
 # Las tres opciones del menú de documentos anteriores, tal como se leen en
 # pantalla. Se traducen al flag correspondiente al armar el comando.
 LIMPIAR_NO_TOCAR = "No tocarlos"
@@ -95,6 +179,7 @@ class InterfazBot(ctk.CTk):
         self.cola_salida: "queue.Queue[str]" = queue.Queue()
         self.total_filas = None
         self.cancelado_por_usuario = False
+        self.ventana_ayuda = None
 
         self._construir_widgets()
         self._actualizar_visibilidad_modo()
@@ -105,9 +190,15 @@ class InterfazBot(ctk.CTk):
     def _construir_widgets(self):
         pad = {"padx": 14, "pady": 8}
 
+        # El título, con el acceso a las instrucciones a la derecha.
+        marco_titulo = ctk.CTkFrame(self, fg_color="transparent")
+        marco_titulo.pack(fill="x", **pad)
         ctk.CTkLabel(
-            self, text="Bot ShiftLaboral", font=ctk.CTkFont(size=20, weight="bold")
-        ).pack(anchor="w", **pad)
+            marco_titulo, text="Bot ShiftLaboral", font=ctk.CTkFont(size=20, weight="bold")
+        ).pack(side="left")
+        ctk.CTkButton(
+            marco_titulo, text="¿Cómo se usa?", width=130, command=self._abrir_ayuda
+        ).pack(side="right")
 
         # Paso 1: abrir el Chrome de depuración e iniciar sesión a mano.
         marco_chrome = ctk.CTkFrame(self)
@@ -224,6 +315,51 @@ class InterfazBot(ctk.CTk):
         self.texto_log = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Consolas", size=12))
         self.texto_log.pack(fill="both", expand=True, padx=14, pady=(0, 14))
         self.texto_log.configure(state="disabled")
+
+    # Las instrucciones, en una ventana aparte que se puede dejar abierta al
+    # lado mientras se usa el bot. Si ya está abierta, se trae al frente en vez
+    # de abrir una segunda.
+    def _abrir_ayuda(self):
+        if self.ventana_ayuda is not None and self.ventana_ayuda.winfo_exists():
+            self.ventana_ayuda.lift()
+            self.ventana_ayuda.focus()
+            return
+
+        ventana = ctk.CTkToplevel(self)
+        ventana.title("Cómo se usa el bot")
+        ventana.geometry("640x720")
+        ventana.minsize(520, 480)
+        self.ventana_ayuda = ventana
+
+        # El ícono hay que ponerlo con un retraso: en Windows, customtkinter
+        # arma la ventana después y pisa lo que se le haya puesto antes.
+        ventana.after(250, lambda: self._icono_en_ayuda(ventana))
+
+        contenido = ctk.CTkScrollableFrame(ventana)
+        contenido.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+
+        for titulo, parrafos in AYUDA:
+            ctk.CTkLabel(
+                contenido, text=titulo, font=ctk.CTkFont(size=15, weight="bold"),
+                anchor="w", justify="left",
+            ).pack(fill="x", pady=(14, 4))
+            for parrafo in parrafos:
+                aviso = parrafo.startswith("⚠")
+                ctk.CTkLabel(
+                    contenido, text=parrafo, anchor="w", justify="left",
+                    wraplength=540,
+                    text_color=("#b3261e", "#f2b8b5") if aviso else None,
+                    font=ctk.CTkFont(weight="bold") if aviso else None,
+                ).pack(fill="x", pady=3)
+
+        ctk.CTkButton(ventana, text="Cerrar", command=ventana.destroy).pack(pady=(0, 14))
+
+    def _icono_en_ayuda(self, ventana):
+        try:
+            if ventana.winfo_exists():
+                ventana.iconbitmap(_ruta_icono())
+        except Exception:
+            pass
 
     def _fila_archivo(self, contenedor, etiqueta, comando_elegir):
         fila = ctk.CTkFrame(contenedor, fg_color="transparent")

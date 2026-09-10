@@ -1434,6 +1434,33 @@ llama `main()` dos veces en el mismo proceso), y partir el `main()` de
 si el archivo sigue creciendo — y recién después de tener más cobertura de
 tests.
 
+### 12.17 Ventana de ayuda dentro de la app (10/09/2026)
+
+Pedido del usuario: que la app explique sola cómo se usa, sin depender de
+`GUIA_EJECUCION.txt` ni del README (que además apuntan a los `.bat`, no a la
+interfaz).
+
+- Botón **«¿Cómo se usa?»** arriba a la derecha del título. Abre una
+  `CTkToplevel` con `CTkScrollableFrame` — **ventana aparte a propósito**, en
+  vez de convertir la principal en `CTkTabview`: no toca el layout ya
+  validado, y se puede dejar abierta al lado mientras el bot trabaja.
+- Una sola instancia: si ya está abierta se hace `lift()` en vez de abrir otra.
+- El texto vive en la constante **`AYUDA`** (lista de `(título, [párrafos])`),
+  separado del código que la dibuja, para poder corregir redacción sin tocar
+  la interfaz. Los párrafos que empiezan con `⚠` se pintan en rojo y negrita.
+- 8 secciones / 25 párrafos: antes de empezar (sesión única), los 3 modos,
+  el Excel, la carpeta de documentos, las opciones, mientras corre, el
+  reporte, y qué hacer si algo falla.
+- 🔴 Incluye a propósito el aviso de que **el modo prueba NO protege el
+  borrado de documentos**: `--no-guardar` solo evita el clic en Guardar; con
+  `--limpiar-documentos borrar` los documentos se borran igual. Ahora que el
+  menú de borrado quedó en la interfaz justo al lado del checkbox de modo
+  prueba, es fácil asumir lo contrario. **Sigue pendiente decidir** si conviene
+  además que `--no-guardar` fuerce la limpieza a `listar` (cambiaría un
+  comportamiento existente, por eso no se tocó).
+- El ícono de la ventana se pone con `after(250, ...)` porque en Windows
+  customtkinter arma el Toplevel después y pisa un `iconbitmap` inmediato.
+
 ### 12.16 Una sola visita a la vista de documentos por persona (10/09/2026)
 
 🔴 **Optimización de tiempo, la más grande del proyecto.** Los tres flags de
