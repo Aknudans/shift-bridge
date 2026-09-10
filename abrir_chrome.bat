@@ -12,8 +12,8 @@ echo script: sirve para cualquier modo de ejecucion.
 echo.
 echo   - ejecutar_bot.bat / ejecutar_crear.bat   -> ya abren Chrome solos.
 echo   - Comandos "python crear_o_editar.py ..."  con --limpiar-documentos,
-echo     --subir-documentos o --no-guardar        -> abri Chrome con ESTE .bat
-echo     primero, inicia sesion, y despues corre el comando.
+echo     --subir-documentos o --no-guardar        -> abrir Chrome con ESTE .bat
+echo     primero, iniciar sesion, y despues correr el comando.
 echo.
 
 REM Si ya hay un Chrome con este perfil abierto, esto solo abre una pestaña
@@ -22,12 +22,12 @@ start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugg
 
 echo ============================================================
 echo   ACCION REQUERIDA:
-echo   Si no habias iniciado sesion en este perfil, hacelo
+echo   Si la sesion no estaba iniciada en este perfil, iniciarla
 echo   MANUALMENTE en la ventana de Chrome que se abrio.
-echo   El bot nunca ve ni guarda tu clave.
+echo   El bot nunca ve ni guarda la clave.
 echo ============================================================
 echo.
-echo Cuando estes con la sesion iniciada, ya podes correr el bot
-echo desde otra ventana (deja esta abierta si queres).
+echo Con la sesion iniciada, ya se puede correr el bot desde otra
+echo ventana (esta ventana se puede dejar abierta).
 echo.
 pause

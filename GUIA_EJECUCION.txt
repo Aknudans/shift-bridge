@@ -18,18 +18,18 @@ reporte.
 Opcion recomendada - un solo doble-click:
   1. Doble-click en ejecutar_bot.bat
   2. Se abre Chrome en un perfil separado y navega a ShiftLaboral. Si es la
-     primera vez, inicia sesion manualmente con tu usuario y contrasena (el
-     bot nunca ve ni guarda tu clave). Si ya habias iniciado sesion antes,
-     solo confirma que la pagina cargo bien.
-  3. Presiona una tecla en la consola para continuar.
-  4. Arrastra tu Excel de entrada a la consola y presiona Enter.
-  5. El bot corre solo. Al terminar, revisa reporte.xlsx en la misma carpeta.
+     primera vez, iniciar sesion manualmente con el usuario y la contrasena
+     habituales (el bot nunca ve ni guarda la clave). Si la sesion ya estaba
+     iniciada, solo confirmar que la pagina cargo bien.
+  3. Presionar una tecla en la consola para continuar.
+  4. Arrastrar el Excel de entrada a la consola y presionar Enter.
+  5. El bot corre solo. Al terminar, revisar reporte.xlsx en la misma carpeta.
 
-Opcion manual (equivalente, si quieres mas control):
+Opcion manual (equivalente, para mas control):
 
   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 
-  Inicia sesion manualmente en https://externoslof.shiftlabor.com/, luego en
+  Iniciar sesion manualmente en https://externoslof.shiftlabor.com/, luego en
   otra terminal:
 
   python buscar_y_comparar.py --input mi_lista.xlsx --output reporte.xlsx
@@ -45,9 +45,9 @@ Resultado (reporte.xlsx), una fila por colaborador:
 Mismo mecanismo, script y .bat distintos:
   1. Doble-click en ejecutar_crear.bat
   2. Mismos pasos de login que Fase 1 (reutiliza el mismo perfil de Chrome,
-     asi que si ya iniciaste sesion antes no hace falta hacerlo de nuevo).
-  3. Arrastra tu Excel y presiona Enter.
-  4. Al terminar, revisa reporte_crear.xlsx
+     asi que si la sesion ya estaba iniciada no hace falta hacerlo de nuevo).
+  3. Arrastrar el Excel y presionar Enter.
+  4. Al terminar, revisar reporte_crear.xlsx
 
 Equivalente manual:
 
@@ -86,7 +86,7 @@ PROVEEDOR, CARGO y TIENDA pueden traer el prefijo "LOGISTICA FALABELLA/"
 5. PROBLEMAS COMUNES
 -----------------------
 - "No se pudo conectar a Chrome en el puerto 9222"
-  -> Verifica que Chrome este abierto con el comando/launcher correcto, y
+  -> Verificar que Chrome este abierto con el comando/launcher correcto, y
      que no haya otra ventana de Chrome normal (perfil distinto)
      interfiriendo.
 

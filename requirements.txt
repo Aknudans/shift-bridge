@@ -2,3 +2,7 @@ playwright>=1.40
 pandas>=2.0
 openpyxl>=3.1
 customtkinter>=5.2
+
+# Solo hace falta para construir ShiftLaboralBot.exe (construir_exe.bat).
+# NO es necesario para correr los scripts directo con Python.
+pyinstaller>=6.0

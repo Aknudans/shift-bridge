@@ -19,5 +19,10 @@ Docs_*/
 __pycache__/
 *.pyc
 
+# Artefactos de PyInstaller (generados por construir_exe.bat) - el .exe pesa
+# ~100 MB, no tiene sentido versionarlo. El .spec SI se versiona.
+build/
+dist/
+
 # Configuracion local de Claude Code (especifica de esta maquina)
 .claude/

@@ -1,3 +1,14 @@
+> **⚠️ REGLA DE IDIOMA — INQUEBRANTABLE.** Todo texto en español de este
+> proyecto (código, comentarios, docstrings, mensajes de consola/UI, este
+> archivo, README.md, GUIA_EJECUCION.txt, nombres de commit) se escribe en
+> **español neutro**, sin modismos ni gramática de ninguna variante regional
+> específica (nada de voseo argentino/rioplatense — "vos tenés/hacé/mirá" — ni
+> tuteo coloquial marcado, ni lunfardo/jerga de ningún país). Usar formas
+> impersonales o de infinitivo para instrucciones ("Seleccionar el archivo",
+> "Verificar que Chrome esté abierto") en vez de conjugar en 2ª persona
+> ("elegí", "revisá", "tenés que"). Motivo: se detectó voseo filtrado en
+> código y documentación (revertido el 10/09/2026) — no debe repetirse.
+
 # CLAUDE.md — Bot de automatización ShiftLaboral
 
 Este archivo es el contexto de proyecto para Claude Code. Léelo completo antes de tocar código.
@@ -11,7 +22,12 @@ python -m pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-**Ejecutar el bot** (opción recomendada, un solo doble-click):
+**Ejecutar el bot** (opción recomendada para el usuario final, sin Python
+instalado): `dist/ShiftLaboralBot.exe` (ver sección 12.15 — construirlo con
+`construir_exe.bat`). Mismo botón de "Abrir Chrome", mismos 3 modos, log en
+vivo y barra de progreso, sin ninguna ventana de consola detrás.
+
+**Ejecutar el bot en desarrollo** (con Python instalado, un solo doble-click):
 ```
 ejecutar_interfaz.bat
 ```
@@ -573,7 +589,15 @@ interfaz.py             — interfaz gráfica (customtkinter) de escritorio: ele
                           log en vivo y barra de progreso. Corre los scripts
                           como subproceso (no reimplementa su lógica). Ver 12.11.
 ejecutar_interfaz.bat   — launcher de un click para interfaz.py.
-requirements.txt       — dependencias Python (incluye customtkinter)
+app_entry.py            — punto de entrada único del .exe empaquetado (ver
+                          12.15): sin argumentos abre la interfaz, con
+                          --modo-comparar/--modo-crear corre esa lógica y
+                          termina. NO se usa corriendo los scripts sueltos
+                          con Python, solo lo necesita interfaz.py cuando NO
+                          está empaquetado (en el .exe, se relanza a sí mismo).
+ShiftLaboralBot.spec    — receta de PyInstaller para armar el .exe. Ver 12.15.
+construir_exe.bat       — corre PyInstaller y arma dist/ShiftLaboralBot.exe.
+requirements.txt       — dependencias Python (incluye customtkinter, pyinstaller)
 README.md              — instrucciones de uso para el usuario final (no técnico)
 CLAUDE.md              — este archivo
 ```
@@ -898,8 +922,8 @@ personas de ShiftLaboral** (registrados por OTRO cliente; la plataforma es
 compartida entre todos los proveedores de LOGISTICA FALABELLA — verificado:
 NO están en Colchagua ni en Santa Cruz). Al confirmar en "Crear" un RUT que la
 plataforma ya conoce, el sitio **autocompleta Nombres/Apellidos/Sexo y los
-deja `readonly`** (no dejás cambiar la identidad legal de alguien; solo lo
-asocias a tu grupo). El código hacía `escribir_campo_texto('txtNombres', ...)`
+deja `readonly`** (no se puede cambiar la identidad legal de una persona;
+solo se la asocia al grupo). El código hacía `escribir_campo_texto('txtNombres', ...)`
 sin condición → `.fill()` sobre un `readonly` → `Locator.fill: Timeout 30000ms
 ... element is not editable` → `ERROR`.
 
@@ -1245,6 +1269,80 @@ un caso real que falle agrega riesgo sin beneficio comprobado. Queda como
 "posiblemente resuelto, confirmar en la próxima corrida real de lote grande
 sobre una identidad bloqueada" en vez de cerrado del todo.
 
+### 12.15 Botón "Cancelar proceso" y empaquetado con PyInstaller (08/09/2026)
+
+**Botón de emergencia en `interfaz.py`.** Pedido explícito del usuario: poder
+cortar TODO de inmediato si algo va mal a mitad de una corrida. Se agregó
+`self.boton_cancelar` (rojo, junto a "Iniciar", habilitado solo mientras hay
+un proceso corriendo). Al confirmar (pide confirmación explícita, avisando
+que puede dejar un formulario a medio llenar en ShiftLaboral y que el reporte
+final NO se genera), mata el proceso con `taskkill /F /T /PID <pid>` en un
+hilo aparte — el `/T` es clave: se lleva puesto también el proceso interno
+del driver de Playwright (Node.js), que `Popen.terminate()` solo no siempre
+mata en Windows. **Probado en vivo**: lanzada una corrida real, cortada a los
+2.5s — el proceso murió al instante, sin dejar ningún `node.exe` huérfano, y
+el Chrome de depuración (proceso separado) siguió funcionando sin verse
+afectado.
+
+**Empaquetado con PyInstaller (`ShiftLaboralBot.exe`).** Objetivo: que el
+usuario final interactúe lo menos posible con archivos sueltos (.py, .bat) y
+que no aparezca ninguna ventana de consola detrás de la app.
+
+- 🔴 **Problema de arquitectura y su solución.** `interfaz.py` lanzaba
+  `buscar_y_comparar.py`/`crear_o_editar.py` como subproceso con
+  `[sys.executable, "-u", "script.py", ...]`. Empaquetado, `sys.executable`
+  deja de ser un `python.exe` suelto: ES el propio `.exe`, y no hay ningún
+  `.py` al lado para pasarle. Solución (patrón estándar para apps
+  empaquetadas que necesitan aislar trabajo en un subproceso):
+  **`app_entry.py`**, nuevo punto de entrada único que actúa como
+  dispatcher — sin argumentos abre la interfaz; con `--modo-comparar` o
+  `--modo-crear` corre esa lógica (llamando directo a
+  `buscar_y_comparar.main(argv)` / `crear_o_editar.main(argv)`, a los que
+  se les agregó el parámetro opcional `argv=None`) y termina. `interfaz.py`
+  (`_comando_base_modo`) arma el comando distinto según `sys.frozen`:
+  empaquetado, `[sys.executable, "--modo-crear", ...]` (se relanza a sí
+  mismo); en desarrollo, `[sys.executable, "-u", "app_entry.py", "--modo-crear", ...]`.
+- **Sin ventana de consola, en ningún lado.** `subprocess.Popen(...,
+  creationflags=subprocess.CREATE_NO_WINDOW)` en `interfaz.py` — evita que
+  Windows abra/parpadee una consola negra cada vez que se lanza el
+  subproceso (python.exe/el .exe son de subsistema consola por default,
+  aunque el .exe final se compile `console=False`). El `.exe` en sí se
+  compila con `console=False` (`ShiftLaboralBot.spec`), así que ni siquiera
+  la ventana principal de la interfaz tiene consola detrás.
+- **Playwright funciona empaquetado sin cambios**: su propio código YA
+  soporta `sys.frozen` (`compute_driver_executable()` en
+  `playwright/_impl/_driver.py`) y YA oculta la consola de su proceso driver
+  interno en Windows (`STARTF_USESHOWWINDOW` + `SW_HIDE`, en
+  `_transport.py`) — no hubo que tocar nada de eso. Sí hay que empaquetar a
+  mano la carpeta `playwright/driver` (Node.js + scripts, ~100 MB) con
+  `--add-data`, porque PyInstaller no la detecta sola (no es código Python
+  importado, es un recurso de datos).
+- **`ShiftLaboralBot.spec`**: calcula la ruta del driver de Playwright en el
+  momento de construir (`os.path.dirname(playwright.__file__)`), NO
+  hardcodeada, para que el mismo `.spec` sirva en cualquier computador.
+  También incluye `collect_data_files('customtkinter')` (temas/JSON que
+  necesita en runtime). Un solo archivo (`--onefile`), sin consola
+  (`console=False`).
+- **`construir_exe.bat`**: instala PyInstaller si falta y corre
+  `pyinstaller ShiftLaboralBot.spec`. Resultado: `dist/ShiftLaboralBot.exe`
+  (~97 MB, la mayor parte es el driver de Playwright).
+- ✅ **Validado en vivo (08/09/2026)**: `dist/ShiftLaboralBot.exe
+  --modo-comparar --input SHIFT.xlsx --output ...` llegó exactamente al mismo
+  punto que en modo desarrollo (cargó el Excel, intentó conectar a Chrome en
+  el puerto 9222). Lanzado sin argumentos, apareció la ventana "Bot
+  ShiftLaboral" — confirmado con `Get-Process` que NO hay ningún
+  `conhost.exe`/consola asociada al proceso. (Nota: un `.exe --onefile`
+  siempre muestra 2 procesos con el mismo nombre en el Administrador de
+  Tareas — el lanzador que se autoextrae + el proceso real; es
+  comportamiento normal de PyInstaller, no un bug.) **Falta**: probar un
+  modo real (crear/editar + subir documentos) desde el `.exe` con sesión de
+  ShiftLaboral iniciada — no se pudo completar en esta sesión porque la
+  sesión de Chrome había expirado y requiere login manual.
+- `.gitignore`: `build/` y `dist/` ignorados (el `.exe` pesa ~100 MB, no
+  tiene sentido versionarlo); `ShiftLaboralBot.spec` SÍ se versiona.
+  `requirements.txt` agrega `pyinstaller>=6.0` con nota de que solo hace
+  falta para construir el `.exe`, no para correr los scripts con Python.
+
 ## 13. PENDIENTES — retomar próxima sesión (actualizado 08/09/2026)
 
 Estado al cierre del 08/09/2026 (rama `carga-masiva`, sale de `Crear`).
@@ -1284,6 +1382,11 @@ interfaz gráfica `interfaz.py` (12.11) ya implementados y validados en vivo.
    Confirmar que toda persona del Excel tenga carpeta de documentos y
    viceversa antes de correr `--subir-documentos` en serio (la advertencia de
    12.13 ayuda, pero es post-hoc, no una reconciliación previa).
+3. **Probar `dist/ShiftLaboralBot.exe` con un modo real** (crear/editar y/o
+   subir documentos, no solo comparación) con sesión de ShiftLaboral
+   iniciada — ver 12.15. Solo se validó que el `.exe` llega a intentar
+   conectar a Chrome; falta confirmar un guardado/subida real desde el
+   ejecutable empaquetado (no solo desde `python crear_o_editar.py` directo).
 
 ### Prioridad MEDIA
 3. **Completar `_MAPEO_NOMBRE_TIPO`** (`documentos.py`) para archivos que

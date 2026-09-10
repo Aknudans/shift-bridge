@@ -1,6 +1,6 @@
 # Bot de búsqueda y comparación — ShiftLaboral
 
-Fase 1 del proyecto: **solo lectura**. Busca cada RUT de tu Excel en ShiftLaboral,
+Fase 1 del proyecto: **solo lectura**. Busca cada RUT del Excel en ShiftLaboral,
 compara los datos personales, y genera un reporte. No crea, edita ni borra nada.
 
 ## Instalación (una sola vez por computador)
@@ -27,13 +27,13 @@ Cerrar todas las ventanas de Chrome primero, y luego abrirlo así:
 ```
 
 ### Paso 2 — Iniciar sesión manualmente
-En esa ventana de Chrome que se abrió, entra a https://externoslof.shiftlabor.com/
-e inicia sesión con tu usuario y contraseña, como siempre. Déjala abierta.
+En esa ventana de Chrome que se abrió, ingresar a https://externoslof.shiftlabor.com/
+e iniciar sesión con el usuario y la contraseña habituales. Dejar la ventana abierta.
 
-### Paso 3 — Preparar tu Excel de entrada (`SHIFT.xlsx`)
+### Paso 3 — Preparar el Excel de entrada (`SHIFT.xlsx`)
 La primera hoja usa **los mismos encabezados y el mismo orden que la
-`Planilla Agosto`**, así podés copiar el bloque de personas de la planilla y
-pegarlo directo (pegá como **valores**). Columnas, en orden:
+`Planilla Agosto`**, así se puede copiar el bloque de personas de la planilla y
+pegarlo directo (pegar como **valores**). Columnas, en orden:
 
 ```
 rut | nombre | apellidoPaterno | apellidoMaterno | sexo | cargo | desde | hasta | centroCosto | sucursal | afp | isapre | sueldoBase | PROVEEDOR | TIENDA
@@ -42,15 +42,15 @@ rut | nombre | apellidoPaterno | apellidoMaterno | sexo | cargo | desde | hasta 
 - Las primeras 12 (`rut` … `isapre`) calzan 1 a 1 con la `Planilla Agosto`.
   `centroCosto` y `sucursal` van solo para que el pegado quede alineado; el
   bot no las usa.
-- Las 3 últimas (`sueldoBase`, `PROVEEDOR`, `TIENDA`) **las completás vos**
-  (no vienen en la planilla).
+- Las 3 últimas (`sueldoBase`, `PROVEEDOR`, `TIENDA`) **se completan
+  manualmente** (no vienen en la planilla).
 - El bot traduce y normaliza solo al leer: `sexo` `M`/`F` → `Masculino`/
   `Femenino`; `desde`/`hasta` → Inicio/Fin de contrato; `afp`/`isapre` se
   comparan sin distinguir mayúsculas.
 - **`cargo`**: tiene que quedar con el valor EXACTO del catálogo del sitio,
   con prefijo `LOGISTICA FALABELLA/…` (ej. `LOGISTICA FALABELLA/Operario de
   Bodega EST`). Si no calza exacto, esa fila se reporta `OMITIDO_CARGO` y no
-  se crea/edita. Revisalo después de pegar.
+  se crea/edita. Revisar después de pegar.
 - **`PROVEEDOR`**: `LOGISTICA FALABELLA/Grupo Colchagua Empresa de Servicios
   Transitorios S.A.` (o el otro grupo si corresponde).
 
@@ -68,11 +68,11 @@ Al terminar, se genera `reporte.xlsx` con una fila por colaborador y su estado:
 
 ## Si algo falla
 
-- **"No se pudo conectar a Chrome en el puerto 9222"** → revisa que Chrome esté
-  abierto con el comando del Paso 1, y que no tengas otra ventana de Chrome normal
+- **"No se pudo conectar a Chrome en el puerto 9222"** → verificar que Chrome esté
+  abierto con el comando del Paso 1, y que no haya otra ventana de Chrome normal
   abierta en simultáneo (puede confundir la conexión).
 - **El script no encuentra el proveedor / se traba seleccionando el grupo** → el
-  texto del dropdown de proveedores puede no calzar exacto con lo que dice tu
+  texto del dropdown de proveedores puede no calzar exacto con lo que dice la
   columna "Proveedor" del Excel. Revisar `seleccionar_grupo_proveedor()` en el
   código y ajustar el texto de búsqueda.
 - **ShiftLaboral cambió algo en su sitio** → los selectores usados están todos

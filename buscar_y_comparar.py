@@ -1,38 +1,3 @@
-"""
-Bot de búsqueda y comparación de colaboradores — ShiftLaboral (Fase 1: solo lectura)
-=======================================================================================
-
-QUÉ HACE:
-Para cada colaborador de tu Excel de entrada, busca su RUT en ShiftLaboral. Si lo
-encuentra, extrae Nombres, Apellido Paterno, Apellido Materno, Sexo, AFP, Sistema
-de Salud, Sueldo Base, Proveedores, Cargo y Tiendas, y los compara contra tu
-Excel. Genera un Excel de reporte con 3 estados posibles por fila:
-
-    OK            -> RUT encontrado y todos los datos coinciden
-    ADVERTENCIA   -> RUT encontrado pero uno o más datos NO coinciden (se detallan)
-    NO_ENCONTRADO -> el RUT no existe en ShiftLaboral (candidato a creación futura)
-
-Esta fase NO crea, edita ni borra nada. Solo lee. Es seguro de correr las veces
-que quieras.
-
-EXCEL DE ENTRADA ESPERADO (primera hoja del archivo):
-    Columnas obligatorias (nombres exactos, case-insensitive):
-        RUT, NOMBRES, apellidoPaterno, apellidoMaterno, SEXO, AFP, ISAPRE,
-        sueldoBase, PROVEEDOR, CARGO, TIENDA
-    Columnas adicionales toleradas (usadas en Fase 2, ignoradas por ahora):
-        fechaContratacion, fechaTermino
-
-USO:
-    python buscar_y_comparar.py --input colaboradores.xlsx --output reporte.xlsx
-
-NOTA IMPORTANTE SOBRE SELECTORES:
-    Los selectores usados aquí (IDs de campos, nombres de dropdowns) fueron
-    extraídos inspeccionando el DOM real de ShiftLaboral el 05/08/2026. Si
-    ShiftLaboral actualiza su plataforma, estos IDs pueden cambiar y el script
-    dejará de funcionar — es el riesgo inherente de automatizar una interfaz
-    no oficial (ver conversación previa sobre por qué no existe una API).
-"""
-
 import argparse
 import time
 from dataclasses import dataclass, field
@@ -53,22 +18,15 @@ from shift_common import (
     seleccionar_grupo_proveedor,
 )
 
-# ---------------------------------------------------------------------------
-# CONFIGURACIÓN — selectores específicos de Fase 1 (búsqueda/comparación).
-# Los selectores compartidos con Fase 2 (conexión, navegación, filtro de RUT,
-# grupo proveedor) viven en shift_common.py — ver ese archivo para esos.
-# ---------------------------------------------------------------------------
+# Selectores propios de esta fase, la que solo mira y compara. Lo que se
+# comparte con la fase de creación está en shift_common.py.
 
-# Ícono "ver" (lupa) de la fila de resultado filtrado. CONFIRMADO EN VIVO
-# 05/08/2026: el ID completo real es
-# "grillaExternosProveedorTrabajadores_cell0_8_grillaExternosProveedorTrabajadores_link_ver_0"
-# pero es más robusto seleccionar por atributo (inmune a cambios de índice/prefijo).
-# Como filtramos por RUT único, siempre debería haber como máximo 1 resultado.
+# La lupa para abrir la ficha. Se busca por el título del enlace y no por su
+# id, que cambia según la fila.
 SELECTOR_BOTON_VER = 'a[title="ver"]'
 
-# Mapeo de las etiquetas que aparecen en la vista de detalle (modo "ver") a
-# nuestros nombres de campo internos. Deben calzar EXACTO con el texto que
-# aparece en pantalla (incluye los dos puntos ":").
+# Cómo se llama cada dato en pantalla y cómo lo llamamos nosotros. El texto
+# tiene que ir igual que en la ficha, con los dos puntos incluidos.
 ETIQUETAS_DETALLE = {
     "Nombres:": "nombre",
     "Apellido Paterno:": "apellido_paterno",
@@ -79,11 +37,8 @@ ETIQUETAS_DETALLE = {
     "Sueldo Base:": "sueldo_base",
 }
 
-# Fragmentos ESTABLES de los ids de los listbox de solo lectura (Proveedores,
-# Categoría Trabajador = Cargo, Tiendas) en la vista de detalle. El resto del
-# id depende del índice de fila del grid filtrado, que no es estable — pero
-# como el filtro de RUT siempre deja como máximo 1 fila, basta con buscar por
-# ESTE fragmento. CONFIRMADO EN VIVO 05/08/2026 con Claude in Chrome.
+# Proveedor, cargo y tienda no son texto suelto sino listas aparte. De sus ids
+# largos solo este pedazo se mantiene igual, y con eso alcanza para ubicarlas.
 ID_FRAGMENTO_PROVEEDORES = "lstProveedores"
 ID_FRAGMENTO_CARGO = "lstVerClientes"
 ID_FRAGMENTO_TIENDA = "listBoxTienda"
@@ -94,45 +49,26 @@ COLUMNAS_EXCEL_REQUERIDAS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# MODELOS DE DATOS
-# ---------------------------------------------------------------------------
-
+# Lo que se anota de cada persona para armar después el reporte.
 @dataclass
 class ResultadoFila:
     rut: str
     nombre_excel: str
-    estado: str  # "OK" | "ADVERTENCIA" | "NO_ENCONTRADO"
+    estado: str
     detalle: str = ""
     datos_sistema: dict = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# LÓGICA DE AUTOMATIZACIÓN ESPECÍFICA DE FASE 1
-# (conexión, navegación y búsqueda de RUT compartidas viven en shift_common.py)
-# ---------------------------------------------------------------------------
-
+# Abre la ficha de la persona filtrada y se trae todos sus datos.
+# La lectura se hace con un poco de JavaScript en vez de con los buscadores de
+# Playwright porque el apellido materno viene envuelto de otra forma que el
+# resto y con esos buscadores nunca aparecía.
 def extraer_datos_detalle(page: Page) -> dict:
-    """
-    Abre la vista de detalle (ícono 'ver') de la primera fila filtrada y extrae
-    los campos personales usando el patrón: <td>Etiqueta:</td><td>Valor</td>.
-
-    Usa page.evaluate (lectura de DOM, no clic) en vez del selector de texto de
-    Playwright (`td:text-is(...) + td`), porque se confirmó en vivo que el
-    campo "Apellido Materno:" en particular viene envuelto en un <span> interno
-    (a diferencia de los demás campos, que son texto plano dentro del <td>).
-    Playwright's :text-is() prefiere el elemento MÁS INTERNO que posee el texto
-    exacto — como el <span> lo posee, el <td> deja de calzar con ese selector y
-    la extracción fallaba en timeout (dato quedaba en None) aunque el valor
-    estuviera perfectamente visible en pantalla. Comparar textContent en JS
-    plano no tiene ese problema, sea o no el texto un nodo directo del <td>.
-    """
     page.click(SELECTOR_BOTON_VER)
     page.wait_for_load_state("networkidle")
     try:
-        # Espera explícita a que el callback AJAX de la vista de detalle haya
-        # terminado de renderizar, en vez de confiar en un sleep fijo (el
-        # tiempo real puede variar según la carga del servidor).
+        # Se espera a que la ficha esté dibujada; cuánto demora depende de
+        # cómo ande el servidor, así que no sirve esperar un rato fijo.
         page.wait_for_selector("td:has-text('Nombres:')", timeout=5000)
     except Exception:
         pass
@@ -149,12 +85,9 @@ def extraer_datos_detalle(page: Page) -> dict:
             }""",
             etiqueta,
         )
-        # Blindaje: si la fila quedó "pegada" en modo edición de una corrida
-        # anterior (ver más abajo, cierre con #btnCancelar), el <td> siguiente
-        # puede contener un editor interactivo con su script de inicialización
-        # completo en vez del valor simple — se manifiesta como texto de miles
-        # de caracteres con código JS. Un valor de negocio real nunca es así
-        # de largo, así que se descarta en vez de reportarlo como discrepancia.
+        # Si la fila quedó abierta en modo edición de una vuelta anterior, en
+        # vez del dato se lee el código del formulario. Ningún dato real es
+        # tan largo, así que se descarta antes de ensuciar el reporte.
         if valor is not None and len(valor) > 300:
             valor = None
         datos[campo] = valor
@@ -177,16 +110,9 @@ def extraer_datos_detalle(page: Page) -> dict:
     return datos
 
 
+# Cierra la ficha con el botón Cancelar. Es obligatorio: si queda abierta, la
+# siguiente persona hereda esa vista abierta y se leen datos que no son suyos.
 def cerrar_vista_detalle(page: Page):
-    """
-    Cierra la vista de detalle con el botón "Cancelar" (#btnCancelar).
-
-    CONFIRMADO EN VIVO 05/08/2026: si no se cierra explícitamente, la fila
-    queda "pegada" en modo edición/expandido — al filtrar la siguiente fila,
-    DevExpress reutiliza ese mismo estado expandido para el nuevo trabajador
-    en vez de mostrar la fila colapsada normal, lo que corrompió una corrida
-    completa (ver sección 6 del CLAUDE.md, "Paso 11").
-    """
     try:
         page.locator("#btnCancelar").click(timeout=3000)
         page.wait_for_load_state("networkidle")
@@ -195,17 +121,10 @@ def cerrar_vista_detalle(page: Page):
         pass
 
 
+# Lee las listas de proveedor, cargo y tienda de la ficha. Una persona puede
+# tener más de uno de cada cosa, así que se devuelven todos juntos separados
+# por coma para poder compararlos contra la celda del Excel.
 def extraer_lista_valores(page: Page, id_fragmento: str) -> Optional[str]:
-    """
-    Extrae todos los valores seleccionados de un listbox de solo lectura
-    (DevExpress ASPxListBox: Proveedores, Categoría Trabajador/Cargo, Tiendas)
-    en la vista de detalle, dado un fragmento estable del id (el resto depende
-    del índice de fila del grid filtrado, que no es estable).
-
-    Puede haber más de un valor si el trabajador tiene más de un
-    proveedor/cargo/tienda asignado — se unen con ", " para poder comparar
-    contra el Excel como un solo string. Devuelve None si no encontró nada.
-    """
     valores = page.evaluate(
         """(fragmento) => {
             return Array.from(document.querySelectorAll('.dxeListBoxItem'))
@@ -217,8 +136,9 @@ def extraer_lista_valores(page: Page, id_fragmento: str) -> Optional[str]:
     return ", ".join(valores) if valores else None
 
 
+# Campo por campo, Excel contra sistema. Si todo calza queda en OK; si algo
+# difiere, queda en advertencia con el detalle de qué no cuadra.
 def comparar_datos(fila_excel: pd.Series, datos_sistema: dict) -> tuple[str, str]:
-    """Compara los datos del Excel contra lo extraído del sistema. Devuelve (estado, detalle)."""
     comparaciones = [
         ("Nombre", fila_excel["NOMBRES"], datos_sistema.get("nombre"), normalizar_texto),
         ("Apellido Paterno", fila_excel["apellidoPaterno"], datos_sistema.get("apellido_paterno"), normalizar_texto),
@@ -244,26 +164,24 @@ def comparar_datos(fila_excel: pd.Series, datos_sistema: dict) -> tuple[str, str
     return "OK", "Todos los datos coinciden"
 
 
-# ---------------------------------------------------------------------------
-# REPORTE DE SALIDA
-# ---------------------------------------------------------------------------
-
+# Color de fondo de cada fila del reporte, para leerlo de un vistazo.
 COLORES_ESTADO = {
-    "OK": "C6EFCE",             # verde suave
-    "ADVERTENCIA": "FFEB9C",    # amarillo suave
-    "NO_ENCONTRADO": "FFC7CE",  # rojo suave
+    "OK": "C6EFCE",
+    "ADVERTENCIA": "FFEB9C",
+    "NO_ENCONTRADO": "FFC7CE",
 }
 
 
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
-
-def main():
+# Recorre el Excel fila por fila: elige el grupo, busca el RUT, compara y
+# anota el resultado. Si una persona falla, se deja el error escrito y se
+# sigue con la siguiente, nunca se corta el lote entero.
+# Los argumentos se pueden pasar a mano en vez de leerlos de la línea de
+# comandos, que es como los llama la app empaquetada.
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Bot de búsqueda y comparación — ShiftLaboral (solo lectura)")
     parser.add_argument("--input", required=True, help="Ruta al Excel de colaboradores a verificar")
     parser.add_argument("--output", default="reporte.xlsx", help="Ruta del Excel de salida")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     df = cargar_excel(args.input, COLUMNAS_EXCEL_REQUERIDAS)
     print(f"Cargados {len(df)} colaboradores desde {args.input}")
@@ -308,7 +226,7 @@ def main():
                                              estado="ERROR",
                                              detalle=f"Error inesperado durante el procesamiento: {e}"))
             print(f"   -> ERROR: {e}")
-            # Intentar recuperar el estado de la página para la siguiente fila
+            # Se intenta dejar la página en orden para la fila siguiente.
             try:
                 asegurar_pagina_trabajadores(page)
             except Exception:
@@ -316,7 +234,7 @@ def main():
 
     escribir_reporte(resultados, args.output, COLORES_ESTADO)
 
-    # Resumen en consola
+    # Conteo final para la consola.
     total = len(resultados)
     ok = sum(1 for r in resultados if r.estado == "OK")
     adv = sum(1 for r in resultados if r.estado == "ADVERTENCIA")

@@ -9,26 +9,26 @@ echo ============================================================
 echo.
 
 REM --- Paso 1: abrir Chrome con el puerto de depuracion, perfil separado ---
-REM Se usa un --user-data-dir propio para no chocar con tus ventanas de
-REM Chrome normales. La sesion queda guardada entre corridas: solo deberias
-REM iniciar sesion la primera vez.
+REM Se usa un --user-data-dir propio para no chocar con las ventanas de
+REM Chrome normales. La sesion queda guardada entre corridas: solo hace
+REM falta iniciar sesion la primera vez.
 echo [1/4] Abriendo Chrome en modo depuracion (perfil separado)...
 start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\ChromeDebugShiftLaboral" "https://externoslof.shiftlabor.com/"
 
 echo.
 echo ============================================================
 echo   ACCION REQUERIDA:
-echo   Si no habias iniciado sesion en este perfil, hacelo
+echo   Si la sesion no estaba iniciada en este perfil, iniciarla
 echo   MANUALMENTE en la ventana de Chrome que se abrio (usuario
-echo   y contrasena). El bot nunca ve ni guarda tu clave.
-echo   Si ya estabas logueado, solo verifica que la pagina cargo.
+echo   y contrasena). El bot nunca ve ni guarda la clave.
+echo   Si ya habia una sesion iniciada, solo verificar que la pagina cargo.
 echo ============================================================
 echo.
 pause
 
 REM --- Paso 2: pedir el archivo Excel de entrada ---
 echo.
-set /p EXCEL_INPUT="[2/4] Arrastra aqui tu archivo Excel de entrada y presiona Enter: "
+set /p EXCEL_INPUT="[2/4] Arrastrar aqui el archivo Excel de entrada y presionar Enter: "
 if "!EXCEL_INPUT!"=="" (
     echo No se indico ningun archivo. Abortando.
     pause
@@ -43,7 +43,7 @@ if not exist "!EXCEL_INPUT!" (
 
 REM --- Paso 3: elegir el modo ---
 echo.
-echo [3/4] Elegi el modo:
+echo [3/4] Seleccionar el modo:
 echo.
 echo   [1] Solo CREAR / EDITAR a las personas (guarda de verdad)
 echo   [2] Crear / editar  +  BORRAR los documentos de los que YA existian
@@ -67,7 +67,7 @@ goto correr
 
 :pedir_docs
 echo.
-set /p CARPETA_DOCS="Arrastra la carpeta con las subcarpetas por persona y presiona Enter: "
+set /p CARPETA_DOCS="Arrastrar la carpeta con las subcarpetas por persona y presionar Enter: "
 set CARPETA_DOCS=!CARPETA_DOCS:"=!
 if not exist "!CARPETA_DOCS!\" (
     echo ERROR: no se encontro la carpeta "!CARPETA_DOCS!"
@@ -84,6 +84,6 @@ python crear_o_editar.py --input "!EXCEL_INPUT!" --output "reporte_crear.xlsx" !
 
 echo.
 echo ============================================================
-echo   Listo. Revisa reporte_crear.xlsx en esta misma carpeta.
+echo   Listo. Revisar reporte_crear.xlsx en esta misma carpeta.
 echo ============================================================
 pause

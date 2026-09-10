@@ -1,14 +1,3 @@
-"""
-Utilidades compartidas entre buscar_y_comparar.py (Fase 1, solo lectura) y
-crear_o_editar.py (Fase 2, creación/edición): conexión a Chrome, navegación,
-búsqueda de RUT, normalización de texto y escritura del reporte Excel.
-
-Este módulo NO se ejecuta solo — es soporte importado por los dos scripts
-principales. Los selectores de acá están confirmados en vivo contra el sitio
-real (ver CLAUDE.md secciones 6 y 12); cualquier selector nuevo que se
-descubra debe documentarse también en CLAUDE.md, no solo quedar en el código.
-"""
-
 import sys
 import time
 from typing import Optional
@@ -18,70 +7,52 @@ from openpyxl.styles import Font, PatternFill
 from playwright.sync_api import sync_playwright, Page
 import pandas as pd
 
-# ---------------------------------------------------------------------------
-# CONFIGURACIÓN COMPARTIDA
-# ---------------------------------------------------------------------------
+# Direcciones y selectores del sitio que usan tanto la fase de comparación
+# como la de creación/edición. Si el sitio cambia, se ajustan acá.
 
 BASE_URL = "https://externoslof.shiftlabor.com/Funcionalidades/Externos/ProveedorTrabajador.aspx"
-# Puerto de depuración remota de Chrome. Se usa 127.0.0.1 (NO "localhost")
-# porque en Windows "localhost" suele resolver primero a ::1 (IPv6) y Chrome
-# escucha solo en IPv4 -> "connect ECONNREFUSED ::1:9222".
+# Va por IP y no por "localhost" porque en Windows eso apunta a IPv6 y Chrome
+# escucha en IPv4.
 CDP_URL = "http://127.0.0.1:9222"
 
 SELECTOR_FILTRO_RUT = "#grillaExternosProveedorTrabajadores_DXFREditorcol2_I"
 
-# Tabla principal de la grilla. CONFIRMADO EN VIVO 05/08/2026: NO usar
-# "tr.dxgvDataRow" para detectar filas — si una fila quedó previamente
-# "expandida" (vista de detalle abierta) en la misma sesión de navegador, su
-# clase cambia a "dxgvEditFormDisplayRow" y ese selector deja de encontrarla,
-# reportando "no encontrado" con un RUT que sí existe. Mejor buscar el RUT
-# directamente en las celdas, sin depender de la clase de la fila.
+# La grilla de trabajadores. Se busca dentro de la tabla y no por clase de
+# fila, porque una fila abierta antes cambia de clase y se dejaría de encontrar.
 SELECTOR_TABLA_GRILLA = "#grillaExternosProveedorTrabajadores_DXMainTable"
 
-# Input del combo "Grupo Proveedor" (DevExpress ASPxComboBox). CONFIRMADO EN VIVO
-# que requiere clic real de mouse para abrir (no responde a .click() vía JS).
+# Combo de arriba a la izquierda donde se elige el grupo proveedor.
 SELECTOR_INPUT_GRUPO_PROVEEDOR = "#MJJerarquia00_I"
 
-# Selectores del menú lateral, usados para navegar/resetear la vista de
-# Trabajadores pasando por el menú en vez de solo recargar la URL.
+# Menú lateral, para llegar a Trabajadores paso a paso.
 SELECTOR_BOTON_MENU = "#icono_abrir_menu"
-SELECTOR_MENU_EXTERNOS = "#mf_cab_01"  # ⚠️ requiere clic real de mouse
+SELECTOR_MENU_EXTERNOS = "#mf_cab_01"
 SELECTOR_MENU_TRABAJADORES = "#mf_cab_ll_01_01"
 
-# El Excel suele traer Proveedor/Cargo/Tienda con el prefijo
-# "LOGISTICA FALABELLA/" (mismo formato de catálogo), pero el sitio no
-# siempre lo muestra igual entre la vista de solo lectura y el formulario
-# editable (ver CLAUDE.md secciones 6 y 12). Se quita de ambos lados antes
-# de comparar para no generar falsos positivos.
+# El Excel trae proveedor, cargo y tienda con este prefijo adelante, pero el
+# sitio no siempre lo muestra. Se saca de ambos lados antes de comparar.
 PREFIJO_CATALOGO = "LOGISTICA FALABELLA/"
 
 
-# ---------------------------------------------------------------------------
-# UTILIDADES DE TEXTO Y EXCEL
-# ---------------------------------------------------------------------------
+# Comparar texto del Excel contra texto del sitio sin que estorben las
+# mayúsculas, los espacios de más ni el prefijo del catálogo.
 
 def normalizar_texto(valor: Optional[str]) -> str:
-    """Normaliza texto para comparar sin sensibilidad a mayúsculas/espacios."""
     if valor is None:
         return ""
     return str(valor).strip().upper()
 
 
 def quitar_prefijo_catalogo(valor: Optional[str]) -> str:
-    """Quita el prefijo 'LOGISTICA FALABELLA/' (si está) antes de comparar."""
     texto = normalizar_texto(valor)
     if texto.startswith(normalizar_texto(PREFIJO_CATALOGO)):
         return texto[len(PREFIJO_CATALOGO):].strip()
     return texto
 
 
-# El template SHIFT.xlsx usa los MISMOS nombres/orden de columna que la
-# "Planilla Agosto" de origen (rut, nombre, sexo, cargo, desde, hasta, afp,
-# isapre, ...), para que el usuario final copie y pegue el bloque sin remapear
-# nada. Acá se traducen a los nombres internos que espera el resto del código
-# (RUT, NOMBRES, SEXO, CARGO, fechaContratacion, fechaTermino, AFP, ISAPRE).
-# Las columnas centroCosto/sucursal vienen en el template solo para que el
-# pegado calce en columna; el bot no las usa.
+# El Excel llega con los encabezados de la planilla original para que el
+# usuario pegue el bloque tal cual. Acá se traducen a los nombres que usa el
+# resto del código.
 RENOMBRE_COLUMNAS_ENTRADA = {
     "rut": "RUT",
     "nombre": "NOMBRES",
@@ -94,12 +65,8 @@ RENOMBRE_COLUMNAS_ENTRADA = {
 }
 
 
+# La planilla escribe el sexo como M o F y el sitio espera la palabra completa.
 def normalizar_sexo(valor: Optional[str]) -> str:
-    """'M' / 'Masculino' -> 'Masculino'; 'F' / 'Femenino' -> 'Femenino'.
-
-    La Planilla Agosto trae el sexo como 'M'/'F'; ShiftLaboral (y la
-    comparación de Fase 1) esperan la palabra completa. Se aplica al cargar el
-    Excel para que el resto del código no tenga que saber de esto."""
     if valor is None:
         return ""
     t = str(valor).strip().upper()
@@ -112,10 +79,9 @@ def normalizar_sexo(valor: Optional[str]) -> str:
     return str(valor).strip()
 
 
+# Abre el Excel de entrada, lo deja con los nombres de columna internos y
+# corta el programa si falta alguna columna obligatoria.
 def cargar_excel(path: str, columnas_requeridas: list[str]) -> pd.DataFrame:
-    """Carga la primera hoja del Excel, traduce los encabezados estilo
-    'Planilla Agosto' a los nombres internos, normaliza el sexo y valida que
-    estén todas las columnas obligatorias."""
     df = pd.read_excel(path, dtype=str)
     df.columns = [c.strip() for c in df.columns]
     df = df.rename(columns=RENOMBRE_COLUMNAS_ENTRADA)
@@ -131,16 +97,9 @@ def cargar_excel(path: str, columnas_requeridas: list[str]) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# CONEXIÓN Y NAVEGACIÓN
-# ---------------------------------------------------------------------------
-
+# El bot no abre Chrome ni maneja claves: se cuelga de la ventana que la
+# persona ya dejó abierta con la sesión iniciada.
 def conectar_a_chrome_existente():
-    """
-    Se conecta a una ventana de Chrome YA ABIERTA (con --remote-debugging-port=9222)
-    donde el usuario ya inició sesión manualmente en ShiftLaboral. No abre una
-    ventana nueva ni maneja credenciales.
-    """
     playwright = sync_playwright().start()
     try:
         browser = playwright.chromium.connect_over_cdp(CDP_URL)
@@ -155,6 +114,11 @@ def conectar_a_chrome_existente():
     return playwright, browser, page
 
 
+# Las dos formas de pararse en la lista de trabajadores: ir directo por URL, o
+# dar la vuelta por el menú lateral. Lo segundo se usa después de guardar,
+# para que el sitio quede en un estado limpio antes de la fila siguiente
+# (ojo: eso borra el grupo proveedor elegido y hay que volver a elegirlo).
+
 def asegurar_pagina_trabajadores(page: Page):
     if BASE_URL not in page.url:
         page.goto(BASE_URL)
@@ -162,44 +126,19 @@ def asegurar_pagina_trabajadores(page: Page):
 
 
 def navegar_a_trabajadores_por_menu(page: Page):
-    """
-    Va a la vista de Trabajadores pasando por el menú lateral (hamburguesa ->
-    Externos -> Trabajadores), en vez de solo recargar la URL. Se usa tanto
-    para navegación inicial como para RESETEAR la vista después de un
-    Crear/Editar exitoso (pedido explícito del usuario en Fase 2), asegurando
-    que el servidor quede en un estado limpio antes de la siguiente fila.
-
-    Usa .click() de Playwright (clic real), NO page.evaluate — confirmado que
-    el paso "Externos" no responde a click programático vía JS.
-
-    Como esto navega a una página nueva, el Grupo Proveedor seleccionado se
-    pierde — quien llama debe volver a seleccionarlo para la siguiente fila.
-    """
     page.locator(SELECTOR_BOTON_MENU).click(timeout=5000)
     time.sleep(0.3)
-    page.locator(SELECTOR_MENU_EXTERNOS).click(timeout=5000)  # requiere clic real, confirmado
+    page.locator(SELECTOR_MENU_EXTERNOS).click(timeout=5000)
     time.sleep(0.3)
     page.locator(SELECTOR_MENU_TRABAJADORES).click(timeout=5000)
     page.wait_for_load_state("networkidle")
     time.sleep(0.5)
 
 
+# La grilla solo muestra la gente del grupo elegido, así que hay que elegirlo
+# antes de buscar cualquier RUT. En el combo el nombre aparece sin el prefijo
+# del catálogo, por eso se usa solo lo que viene después de la barra.
 def seleccionar_grupo_proveedor(page: Page, nombre_proveedor: str):
-    """
-    Selecciona automáticamente el proveedor/grupo correcto en el combo superior
-    izquierdo (#MJJerarquia00_I) antes de buscar, ya que el listado de
-    trabajadores solo muestra los del grupo seleccionado.
-
-    CONFIRMADO EN VIVO: el combo requiere clic real de mouse para abrir (no
-    responde a .click() programático vía JS) — locator.click() de Playwright
-    simula un clic real y sí funciona.
-
-    La columna PROVEEDOR del Excel puede venir con un prefijo tipo
-    "LOGISTICA FALABELLA/..." (mismo formato usado en los catálogos de
-    Cargo/Tienda), pero el dropdown del sitio solo muestra el texto después de
-    esa barra (ej. "Grupo Colchagua Empresa de Servicios Transitorios S.A.").
-    Se usa solo esa última parte para buscar la opción visible.
-    """
     texto_busqueda = nombre_proveedor.split("/")[-1].strip()
 
     page.locator(SELECTOR_INPUT_GRUPO_PROVEEDOR).click(timeout=5000)
@@ -210,16 +149,10 @@ def seleccionar_grupo_proveedor(page: Page, nombre_proveedor: str):
     time.sleep(0.5)
 
 
+# Filtra la grilla por RUT y dice si apareció alguien. La espera extra es
+# porque el sitio termina de cargar la página antes de terminar de dibujar la
+# fila, y sin eso se daba por no encontrada a gente que sí existe.
 def buscar_rut(page: Page, rut: str) -> bool:
-    """Escribe el RUT en el filtro de la grilla y presiona Enter. Devuelve True si hay resultados.
-
-    CONFIRMADO EN VIVO 05/08/2026: `networkidle` se cumple ANTES de que el
-    callback AJAX de DevExpress termine de renderizar la fila filtrada — un
-    RUT real llegó a reportarse como "no encontrado" porque se leyó el grid
-    demasiado pronto. Se agrega una espera explícita a que aparezca el RUT en
-    una celda de la grilla (o se agote el timeout, señal de que de verdad no
-    hay resultados) en vez de confiar solo en un sleep fijo.
-    """
     filtro = page.locator(SELECTOR_FILTRO_RUT)
     filtro.click()
     filtro.fill("")
@@ -236,8 +169,8 @@ def buscar_rut(page: Page, rut: str) -> bool:
     return page.locator(selector_resultado).count() > 0
 
 
+# Deja la grilla sin filtro para la búsqueda siguiente.
 def limpiar_filtro(page: Page):
-    """Limpia el filtro de RUT para dejar la grilla lista para la siguiente búsqueda."""
     filtro = page.locator(SELECTOR_FILTRO_RUT)
     filtro.click()
     filtro.fill("")
@@ -246,17 +179,11 @@ def limpiar_filtro(page: Page):
     time.sleep(0.3)
 
 
-# ---------------------------------------------------------------------------
-# REPORTE DE SALIDA
-# ---------------------------------------------------------------------------
-
+# Arma el Excel final, una fila por persona y con el color según cómo salió.
+# Sirve para las dos fases: solo pide objetos con rut, nombre, estado y
+# detalle. Si el archivo está abierto en Excel, guarda con otro nombre en vez
+# de perder el trabajo de toda la corrida.
 def escribir_reporte(resultados: list, output_path: str, colores_estado: dict):
-    """Escribe un reporte Excel coloreado por estado.
-
-    `resultados` es cualquier lista de objetos con atributos .rut,
-    .nombre_excel, .estado y .detalle (cada script define su propio
-    ResultadoFila, con campos adicionales si los necesita).
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Reporte"

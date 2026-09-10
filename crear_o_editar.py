@@ -1,46 +1,3 @@
-"""
-Bot de creación y edición de colaboradores — ShiftLaboral (Fase 2)
-====================================================================
-
-QUÉ HACE:
-Para cada colaborador de tu Excel de entrada, busca su RUT en ShiftLaboral:
-
-    - Si NO existe -> hace clic en "Crear" y llena el formulario completo con
-      los datos del Excel.
-    - Si SÍ existe -> hace clic en "editar", lee los valores ACTUALES del
-      formulario, calcula qué campos difieren del Excel, y modifica SOLO esos
-      campos (nunca toca los que ya coinciden).
-
-En ambos casos, si el Cargo del Excel no calza EXACTO con una opción real del
-catálogo (dropdown "Categoría Trabajador"), esa fila se OMITE COMPLETA (no se
-crea ni se edita nada de esa persona) y se reporta como error.
-
-Al final genera un Excel de reporte con el resultado de cada fila: CREADO,
-EDITADO (con el detalle de qué campos cambiaron), SIN_CAMBIOS, OMITIDO_CARGO
-o ERROR.
-
-⚠️ A DIFERENCIA DE buscar_y_comparar.py (Fase 1, solo lectura), este script
-   SÍ modifica datos reales en ShiftLaboral. Probarlo primero con 2-3 filas
-   de prueba antes de correrlo contra el Excel completo de producción — igual
-   protocolo que el descrito en CLAUDE.md sección 8, pero aplicado a Fase 2.
-
-REQUISITOS PREVIOS: los mismos que buscar_y_comparar.py — ver ese archivo o
-README.md. Usar preferentemente ejecutar_crear.bat, que automatiza la
-apertura de Chrome y el login.
-
-EXCEL DE ENTRADA ESPERADO: mismas columnas que buscar_y_comparar.py, más
-fechaContratacion y fechaTermino, que aquí SÍ son obligatorias (se usan para
-Inicio Contrato / Fin Contrato al crear o editar).
-
-USO:
-    python crear_o_editar.py --input colaboradores.xlsx --output reporte_crear.xlsx
-
-NOTA IMPORTANTE: los selectores de "editar"/"Crear"/"Guardar" fueron
-explorados en vivo el 05/08/2026 (ver CLAUDE.md sección 12), pero el botón
-"Guardar" nunca se probó realmente durante esa exploración (a propósito, para
-no modificar datos sin autorización). Validar con cuidado la primera corrida.
-"""
-
 import argparse
 import os
 import sys
@@ -51,10 +8,9 @@ from typing import Optional
 import pandas as pd
 from playwright.sync_api import Page
 
-# La consola de Windows (cp1252) no puede imprimir varios caracteres que
-# aparecen en los mensajes de error de Playwright (flechas, etc.). Sin esto,
-# un `print()` de un error revienta con UnicodeEncodeError y MATA todo el
-# script en vez de registrar la fila y seguir con la siguiente.
+# La consola de Windows no sabe mostrar algunos símbolos que traen los
+# mensajes de error. Sin esto, imprimir un error mataba el programa entero en
+# vez de anotar la fila y seguir con la siguiente.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -96,55 +52,31 @@ from documentos import (
     tipos_documentos_existentes,
 )
 
-# ---------------------------------------------------------------------------
-# CONFIGURACIÓN — selectores específicos de Fase 2 (crear/editar). Los
-# selectores compartidos con Fase 1 (conexión, navegación, filtro de RUT,
-# grupo proveedor) viven en shift_common.py; las primitivas de lectura/
-# escritura de campos del formulario (comboboxes, multi-select, etc.) viven
-# en campos_formulario.py — ver esos archivos para esos selectores.
-# ---------------------------------------------------------------------------
+# Selectores de esta fase, la que crea y edita gente.
 
 SELECTOR_BOTON_EDITAR = 'a[title="editar"]'
 SELECTOR_BOTON_CREAR_NUEVO = "text=Crear"
-# ⚠️ El input real editable es "#txtRutVer_I" — "#txtRutVer_Raw" es un input
-# oculto (type="hidden") que NO hay que tocar directamente (confirmado en vivo).
+# La caja de RUT que se ve en pantalla. Hay otra parecida escondida detrás que
+# no hay que tocar.
 SELECTOR_RUT_CREAR = "#txtRutVer_I"
 SELECTOR_BTN_ACEPTAR_RUT = "#btnAceptaRut"
 
-# Botón "Guardar" del formulario. CONFIRMADO EN VIVO 05/08/2026 por inspección
-# de DOM — NUNCA se hizo clic real en él durante la exploración, para no
-# modificar datos reales sin autorización. Validar con cuidado la primera
-# corrida (ver CLAUDE.md sección 12).
 SELECTOR_BTN_GUARDAR = "#btnGuardar"
 
-# Modo de prueba: si es True, el script llena el formulario completo pero NO
-# hace clic en Guardar (ni resetea la vista por menú). Sirve para revisar
-# visualmente lo que se ingresaría antes de tocar datos reales. Se activa con
-# el flag --no-guardar y lo setea main().
+# Opciones que se prenden desde la línea de comandos y valen para toda la
+# corrida: llenar sin guardar, borrar documentos viejos, subir los nuevos y
+# revisar cuáles ya tiene cada persona.
 NO_GUARDAR = False
-
-# None | "listar" | "borrar" — limpieza de documentos de personas preexistentes.
-# Lo setea main() desde --limpiar-documentos. None = no se toca nada.
 LIMPIAR_DOCUMENTOS = None
-
-# Ruta de la carpeta "Docs" (una subcarpeta por persona). None = no se sube nada.
-# Lo setea main() desde --subir-documentos.
 SUBIR_DOCUMENTOS = None
-
-# True = listar (solo lectura) los tipos de documento que cada persona ya
-# tiene, antes de tocar nada. Lo setea main() desde --verificar-documentos.
 VERIFICAR_DOCUMENTOS = False
 
 
+# Busca la carpeta de documentos que le corresponde a una persona. Compara por
+# palabras sueltas, sin importar el orden ni las tildes, así "Adan_Leon" calza
+# con "ADAN IGNACIO LEON BRAVO". Si no encuentra ninguna, o si hay dos que
+# calzan igual de bien, no adivina: avisa por qué no pudo.
 def _buscar_carpeta_persona(base: str, nombre: str, ap_pat: str, ap_mat: str):
-    """Busca en `base` la subcarpeta cuyo nombre calce con la persona.
-
-    Calce por conjunto de palabras (sin orden, sin tildes, mayúsculas): la
-    carpeta calza si sus tokens (>=2) son un subconjunto de los tokens del
-    nombre completo del Excel. Devuelve (ruta, motivo):
-      ruta   = ruta de la carpeta, o None
-      motivo = "" si ok; texto explicando por qué no, si None
-    """
     tokens_persona = set(_norm_texto(f"{nombre} {ap_pat} {ap_mat}").split())
     try:
         subcarpetas = [d for d in os.listdir(base)
@@ -165,8 +97,8 @@ def _buscar_carpeta_persona(base: str, nombre: str, ap_pat: str, ap_mat: str):
         return None, f"carpeta ambigua: {empatadas}"
     return os.path.join(base, candidatas[0][1]), ""
 
-# Campos de texto simples: mismo ID en "editar" y en "Crear" (gran ventaja,
-# confirmado en vivo). Mapeo etiqueta -> id.
+# Las cajas de texto del formulario. Por suerte se llaman igual al crear que
+# al editar, así que el mismo código sirve para los dos casos.
 CAMPOS_TEXTO = {
     "Nombres:": "txtNombres",
     "Apellido Paterno:": "txtApellidoPaterno",
@@ -174,9 +106,8 @@ CAMPOS_TEXTO = {
     "Sueldo Base:": "txtSueldoBase",
 }
 
-# Combobox de selección única (sin checkboxes) — fragmento estable del id,
-# terminado en "_I" para el input visible (evitar "_VI", que es el valor
-# oculto). Mismo fragmento en editar y crear, solo cambia el prefijo de fila.
+# Las listas de un solo valor. Su nombre completo cambia según la fila, así
+# que se guarda solo el pedazo que se mantiene.
 COMBOBOX_SIMPLES = {
     "Sexo:": "cbSexo",
     "AFP:": "cbAFP",
@@ -192,38 +123,28 @@ COLUMNAS_EXCEL_REQUERIDAS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# MODELOS DE DATOS
-# ---------------------------------------------------------------------------
-
+# Lo que se anota de cada persona para el reporte. "preexistente" marca a los
+# que ya estaban en la plataforma: son los únicos a los que se les limpian los
+# documentos viejos.
 @dataclass
 class ResultadoFila:
     rut: str
     nombre_excel: str
-    estado: str  # "CREADO" | "EDITADO" | "SIN_CAMBIOS" | "OMITIDO_CARGO" | "ERROR"
+    estado: str
     detalle: str = ""
-    # True si la persona YA EXISTÍA en la plataforma (RUT encontrado y editado,
-    # o identidad bloqueada al "Crear"). Habilita la limpieza de documentos.
     preexistente: bool = False
 
 
-# ---------------------------------------------------------------------------
-# UTILIDADES ESPECÍFICAS DE FASE 2
-# (normalizar_texto/quitar_prefijo_catalogo/cargar_excel viven en shift_common.py)
-# ---------------------------------------------------------------------------
-
-
+# Las fechas vienen del Excel en un formato y el sitio las pide en otro.
 def formatear_fecha(valor: Optional[str]) -> str:
-    """Convierte una fecha del Excel (ej. '2026-04-08 00:00:00') al formato
-    dd/mm/aaaa que usa el formulario de ShiftLaboral."""
     if valor is None or str(valor).strip() == "" or str(valor).lower() == "nan":
         return ""
     fecha = pd.to_datetime(valor)
     return fecha.strftime("%d/%m/%Y")
 
 
+# Una celda del Excel que en la práctica está sin llenar.
 def _vacio(valor) -> bool:
-    """True si una celda del Excel debe tratarse como 'no se completó'."""
     if valor is None:
         return True
     if isinstance(valor, float) and pd.isna(valor):
@@ -231,16 +152,11 @@ def _vacio(valor) -> bool:
     return str(valor).strip().lower() in ("", "nan", "nat")
 
 
+# Rellena lo que la planilla suele traer en blanco: si no viene la fecha de
+# término, se toma la de inicio más 89 días, que es como se calcula siempre; y
+# si no viene el sueldo, va cero. Se deja marcada la fila para que el reporte
+# avise que ese dato lo puso el bot y no la planilla.
 def autocompletar_campos_negocio(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplica defaults de negocio a columnas que el usuario puede dejar vacías,
-    y deja una marca por fila para que el reporte final avise que se usó un
-    default en vez de lo que el Excel realmente traía:
-
-    - fechaTermino vacía -> fechaContratacion + 89 días (misma regla ya usada
-      para calcular "hasta" en la Planilla Agosto, ver CLAUDE.md sección 5).
-    - sueldoBase vacío -> se interpreta como 0 (antes quedaba como 'nan' y se
-      escribía literal en el campo Sueldo Base del formulario).
-    """
     df = df.copy()
     df["_fecha_termino_autocompletada"] = False
     df["_sueldo_autocompletado"] = False
@@ -257,6 +173,7 @@ def autocompletar_campos_negocio(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Agrega al reporte la aclaración de qué datos se completaron solos.
 def _con_nota_autocompletado(resultado: ResultadoFila, fila: pd.Series) -> ResultadoFila:
     notas = []
     if bool(fila.get("_fecha_termino_autocompletada")):
@@ -269,13 +186,9 @@ def _con_nota_autocompletado(resultado: ResultadoFila, fila: pd.Series) -> Resul
     return resultado
 
 
-# ---------------------------------------------------------------------------
-# LECTURA DE VALORES ACTUALES (para decidir qué difiere antes de editar)
-# (las primitivas de lectura/escritura de campos viven en campos_formulario.py)
-# ---------------------------------------------------------------------------
-
+# Saca una foto de cómo está hoy el formulario, para después comparar contra
+# el Excel y tocar solamente lo que de verdad cambió.
 def leer_valores_actuales(page: Page) -> dict:
-    """Lee todos los valores actuales del formulario de edición ya abierto."""
     datos = {}
     for etiqueta, campo_id in CAMPOS_TEXTO.items():
         datos[campo_id] = leer_campo_texto(page, campo_id)
@@ -295,10 +208,10 @@ def leer_valores_actuales(page: Page) -> dict:
     return datos
 
 
-# ---------------------------------------------------------------------------
-# FLUJO: EDITAR TRABAJADOR EXISTENTE
-# ---------------------------------------------------------------------------
-
+# Corrige a alguien que ya está en el sistema. Primero revisa el cargo: si no
+# existe tal cual en el sitio, se deja a esa persona intacta y se pasa a la
+# siguiente. Después compara campo por campo y solo escribe donde hay
+# diferencia, para no pisar datos que ya estaban bien.
 def editar_trabajador_existente(page: Page, fila: pd.Series) -> ResultadoFila:
     rut = str(fila["RUT"]).strip()
     nombre_completo = f"{fila['NOMBRES']} {fila['apellidoPaterno']}"
@@ -307,8 +220,7 @@ def editar_trabajador_existente(page: Page, fila: pd.Series) -> ResultadoFila:
     page.wait_for_load_state("networkidle")
     esperar_campos_formulario_editables(page)
 
-    # 1) Validar Cargo ANTES de tocar cualquier campo. Si no calza, se omite
-    #    la fila completa (decisión de negocio confirmada, CLAUDE.md 12.4).
+    # El cargo se revisa antes que nada, para no dejar a alguien a medio editar.
     cargo_deseado = fila["CARGO"]
     if not validar_cargo_existe(page, cargo_deseado):
         cerrar_formulario(page)
@@ -317,7 +229,6 @@ def editar_trabajador_existente(page: Page, fila: pd.Series) -> ResultadoFila:
             detalle=f"Cargo '{cargo_deseado}' no existe en el catálogo real. Fila completa omitida.",
         )
 
-    # 2) Leer valores actuales y calcular diffs.
     actuales = leer_valores_actuales(page)
     campos_cambiados = []
 
@@ -350,11 +261,9 @@ def editar_trabajador_existente(page: Page, fila: pd.Series) -> ResultadoFila:
         escribir_campo_texto(page, "calendarioFechaTermino_txtCalendar", fecha_termino_excel)
         campos_cambiados.append("Fin Contrato")
 
-    # NOTA: a diferencia de la vista de solo lectura (Fase 1), en el formulario
-    # de editar/crear los 3 catálogos (Proveedores, Categoría Trabajador,
-    # Tiendas) SÍ muestran el prefijo "LOGISTICA FALABELLA/" — confirmado en
-    # vivo. Por eso aquí se pasa el valor COMPLETO del Excel (con prefijo) a
-    # establecer_multiselect_valor_unico, sin recortarlo.
+    # Acá el sitio sí muestra el prefijo del catálogo en proveedor, cargo y
+    # tienda (en la ficha de solo lectura no), así que se le pasa el valor
+    # completo del Excel tal como viene, sin recortarle nada.
     proveedor_excel = quitar_prefijo_catalogo(fila["PROVEEDOR"])
     proveedores_actuales = [quitar_prefijo_catalogo(v) for v in actuales.get("proveedores", [])]
     if proveedores_actuales != [proveedor_excel]:
@@ -399,12 +308,9 @@ def editar_trabajador_existente(page: Page, fila: pd.Series) -> ResultadoFila:
     page.wait_for_load_state("networkidle")
     time.sleep(0.5)
 
-    # Mismo popup "Operación Exitosa" que en crear_trabajador_nuevo — cerrarlo
-    # antes de seguir o el overlay traba todo lo que viene después.
+    # Cerrar el aviso de éxito y recién ahí confirmar que se guardó de verdad.
     cerrar_popup_operacion_exitosa(page)
 
-    # Igual que en crear_trabajador_nuevo: confirmar que el sitio no dejó el
-    # formulario abierto por un error de validación antes de reportar éxito.
     guardado_ok, motivo_error = verificar_guardado_exitoso(page)
     if not guardado_ok:
         cerrar_formulario(page)
@@ -419,10 +325,8 @@ def editar_trabajador_existente(page: Page, fila: pd.Series) -> ResultadoFila:
     ), fila)
 
 
-# ---------------------------------------------------------------------------
-# FLUJO: CREAR TRABAJADOR NUEVO
-# ---------------------------------------------------------------------------
-
+# Da de alta a alguien que no estaba en el grupo. Primero se escribe el RUT y
+# se confirma; de ahí en adelante aparece el resto del formulario.
 def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
     rut = str(fila["RUT"]).strip()
     nombre_completo = f"{fila['NOMBRES']} {fila['apellidoPaterno']}"
@@ -439,22 +343,19 @@ def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
     page.locator(SELECTOR_BTN_ACEPTAR_RUT).click(timeout=5000)
     page.wait_for_load_state("networkidle")
 
-    # Tras confirmar el RUT pueden pasar 2 cosas (confirmado en vivo 07/09/2026):
-    #  (a) RUT NUEVO para la plataforma -> Nombres/Apellidos vacíos y editables
-    #      (una vez que termina el callback de DevExpress).
-    #  (b) RUT YA REGISTRADO en ShiftLaboral (posiblemente por OTRO cliente, fuera
-    #      de nuestros grupos) -> el sitio autocompleta Nombres/Apellidos/Sexo y
-    #      los deja READONLY. No se pueden sobrescribir (y no se debe: es la
-    #      identidad legal de la persona). Antes esto reventaba con
-    #      `Locator.fill: Timeout 30000ms ... element is not editable`.
-    # Se espera a que el form termine de armarse en cualquiera de los 2 estados.
+    # Al confirmar el RUT pueden pasar dos cosas: que sea alguien nuevo del
+    # todo, y entonces el nombre viene vacío y se puede escribir; o que la
+    # plataforma ya lo conozca de otro cliente, y ahí ella misma completa
+    # nombre y apellidos y los deja bloqueados, porque la identidad de una
+    # persona no se cambia, solo se la suma al grupo. Se espera a que el
+    # formulario termine de armarse en cualquiera de los dos casos.
     try:
         page.wait_for_function(
             """() => {
                 const e = document.getElementById('txtNombres');
                 if (!e) return false;
-                if (!e.readOnly && !e.disabled) return true;           // (a) editable
-                if (e.readOnly && e.value.trim() !== '') return true;   // (b) identidad precargada
+                if (!e.readOnly && !e.disabled) return true;           // persona nueva
+                if (e.readOnly && e.value.trim() !== '') return true;   // ya la conocían
                 return false;
             }""",
             timeout=8000,
@@ -474,8 +375,8 @@ def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
     identidad_bloqueada = ident["readonly"] and ident["nombres"].strip() != ""
 
     if identidad_bloqueada:
-        # El RUT ya existe en la maestra de personas de ShiftLaboral. Comparamos
-        # la identidad que trae el sistema contra el Excel.
+        # Si la plataforma ya tenía a esta persona, se contrasta lo que ella
+        # dice contra lo que dice el Excel antes de seguir.
         difs = []
         for etiqueta, val_sis, col in (
             ("Nombres", ident["nombres"], "NOMBRES"),
@@ -491,8 +392,8 @@ def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
                 detalle="RUT ya registrado en ShiftLaboral con identidad DISTINTA a la del "
                         "Excel; no se creó nada. Diferencias: " + "; ".join(difs),
             )
-        # Identidad coincide -> se continúa SIN tocar Nombres/Apellidos/Sexo
-        # (vienen readonly). El resto de campos se llenan igual que siempre.
+        # Si coincide, se sigue sin tocar nombre, apellidos ni sexo; el resto
+        # del formulario se llena igual que siempre.
     else:
         escribir_campo_texto(page, "txtNombres", str(fila["NOMBRES"]))
         escribir_campo_texto(page, "txtApellidoPaterno", str(fila["apellidoPaterno"]))
@@ -539,17 +440,12 @@ def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
     page.wait_for_load_state("networkidle")
     time.sleep(0.5)
 
-    # 🔴 ShiftLaboral muestra un popup modal "Operación Exitosa" con botón
-    # "Aceptar" tras guardar. Si no se cierra, su overlay tapa la página y
-    # TODO lo que sigue (releer la grilla, la fila siguiente) se cuelga
-    # esperando un elemento tapado — el lote entero queda trabado en esta
-    # misma fila sin poder avanzar. Cerrarlo ANTES de verificar nada más.
+    # El aviso de "Operación Exitosa" se cierra antes de cualquier otra cosa:
+    # mientras esté abierto, todo lo que venga después se queda esperando.
     cerrar_popup_operacion_exitosa(page)
 
-    # No asumir éxito solo porque no hubo excepción: el sitio no cambia de URL
-    # al guardar, así que un error de validación (campo obligatorio vacío,
-    # formato inválido) deja el mismo formulario abierto en vez de avisar con
-    # una excepción de Playwright. Confirmar explícitamente.
+    # Que no haya reventado nada no significa que se haya guardado, así que se
+    # comprueba en serio.
     guardado_ok, motivo_error = verificar_guardado_exitoso(page)
     if not guardado_ok:
         cerrar_formulario(page)
@@ -558,8 +454,8 @@ def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
             detalle=f"No se pudo confirmar la creación: {motivo_error}",
         )
 
-    # Confirmación positiva: releer la grilla y verificar que el RUT
-    # realmente quedó ahí, en vez de confiar en la ausencia de errores.
+    # Y como prueba final, se vuelve a buscar el RUT en la lista para ver que
+    # la persona quedó realmente ahí.
     try:
         limpiar_filtro(page)
     except Exception:
@@ -581,10 +477,7 @@ def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
     ), fila)
 
 
-# ---------------------------------------------------------------------------
-# REPORTE DE SALIDA
-# ---------------------------------------------------------------------------
-
+# Color de fondo de cada fila del reporte según cómo terminó.
 COLORES_ESTADO = {
     "CREADO": "C6EFCE",
     "EDITADO": "C6EFCE",
@@ -594,11 +487,13 @@ COLORES_ESTADO = {
 }
 
 
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
-
-def main():
+# Recorre el Excel persona por persona: elige el grupo, busca el RUT y según
+# esté o no, la edita o la crea. Después, si se pidió, le limpia los
+# documentos viejos y le sube los nuevos. Si alguien falla queda anotado el
+# error y se sigue con el que viene; al final se escribe el reporte.
+# Los argumentos se pueden pasar a mano, que es como los llama la app
+# empaquetada.
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Bot de creación/edición — ShiftLaboral (Fase 2)")
     parser.add_argument("--input", required=True, help="Ruta al Excel de colaboradores a crear/editar")
     parser.add_argument("--output", default="reporte_crear.xlsx", help="Ruta del Excel de salida")
@@ -625,7 +520,7 @@ def main():
                              "Pensado como paso previo de chequeo antes de --subir-documentos "
                              "(que de todas formas ya evita duplicar un tipo existente por su "
                              "cuenta). Se puede usar solo o junto con --subir-documentos.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     global NO_GUARDAR, LIMPIAR_DOCUMENTOS, SUBIR_DOCUMENTOS, VERIFICAR_DOCUMENTOS
     NO_GUARDAR = args.no_guardar
@@ -656,7 +551,7 @@ def main():
 
     resultados: list[ResultadoFila] = []
     grupo_actual = None
-    docs_incompletos = 0  # filas a las que les falta algún doc del set estándar
+    docs_incompletos = 0  # gente a la que le faltó algún documento del set
 
     for i, fila in df.iterrows():
         rut = str(fila["RUT"]).strip()
@@ -682,8 +577,8 @@ def main():
             resultados.append(resultado)
             print(f"   -> {resultado.estado}: {resultado.detalle}")
 
-            # Limpieza de documentos: SOLO si se pidió por flag Y la persona
-            # ya existía Y no hubo error al procesarla.
+            # Borrar los documentos viejos: solo si se pidió, solo a quien ya
+            # existía y solo si no hubo problemas al procesarla.
             if (LIMPIAR_DOCUMENTOS and resultado.preexistente
                     and resultado.estado != "ERROR"):
                 try:
@@ -705,14 +600,11 @@ def main():
                     resultado.detalle += f" | Docs: ERROR en limpieza: {e}"
                     print(f"   -> Docs: ERROR en limpieza: {e}")
                 finally:
-                    # limpiar_documentos_trabajador deja la página en la grilla
-                    # base; el proveedor hay que reseleccionarlo en la sig. fila.
+                    # Esto deja la página en la lista base, así que el grupo
+                    # hay que volver a elegirlo en la persona siguiente.
                     grupo_actual = None
 
-            # Verificación de documentos (solo lectura): lista qué tipos ya
-            # tiene la persona, sin subir ni borrar nada. Paso previo pedido
-            # explícitamente para poder revisar antes de --subir-documentos
-            # (que de todas formas ya evita duplicar un tipo existente).
+            # Repasar qué documentos tiene ya cada persona, sin tocar nada.
             if VERIFICAR_DOCUMENTOS and resultado.estado != "ERROR":
                 try:
                     accion_v, tipos_v = tipos_documentos_existentes(page, rut, proveedor)
@@ -729,13 +621,10 @@ def main():
                 finally:
                     grupo_actual = None
 
-            # Subida de documentos: si se pidió y la persona quedó en el sistema
-            # (o, en --no-guardar, habría quedado). 🔴 Antes solo incluía
-            # CREADO/EDITADO/SIN_CAMBIOS: con --no-guardar, una fila que SÍ
-            # necesitaba cambios sale como SIMULADO_EDITAR/SIMULADO_CREAR (no
-            # EDITADO/CREADO), así que la subida de documentos NUNCA se
-            # probaba para esas filas en modo prueba — solo para las que ya
-            # estaban SIN_CAMBIOS. Confirmado en vivo 08/09/2026.
+            # Subir los documentos nuevos, si se pidió y la persona quedó bien
+            # en el sistema. Los estados simulados también entran acá: son los
+            # de la corrida de prueba, y si no, en modo prueba nunca se
+            # alcanzaba a probar esta parte.
             if (SUBIR_DOCUMENTOS
                     and resultado.estado in (
                         "CREADO", "EDITADO", "SIN_CAMBIOS",
@@ -776,12 +665,11 @@ def main():
                             if errs:
                                 nota += f" | errores: {'; '.join(errs)}"
 
-                            # No bloquea nada (la persona igual se crea/edita y
-                            # se le suben los documentos que sí están) — solo
-                            # avisa en el reporte si falta alguno del set
-                            # estándar de 8. "Ya tenía" cuenta como presente
-                            # (no avisar por algo que ya está cargado de una
-                            # corrida anterior aunque no venga en esta carpeta).
+                            # Si falta alguno de los documentos habituales no
+                            # se frena nada, solo queda la advertencia en el
+                            # reporte. Lo que la persona ya tenía cargado
+                            # cuenta como presente aunque no venga en la
+                            # carpeta de esta vez.
                             presentes_norm = {normalizar_texto(t) for t in (subidos + ya_existian)}
                             faltantes = [t for t in DOCUMENTOS_SET_ESTANDAR
                                          if normalizar_texto(t) not in presentes_norm]
@@ -798,17 +686,14 @@ def main():
                     grupo_actual = None
 
             if resultado.estado in ("CREADO", "EDITADO"):
-                # Pedido explícito del usuario: tras un guardado exitoso,
-                # resetear la vista pasando por el menú antes de seguir, para
-                # no arrastrar ningún estado residual del guardado anterior.
+                # Después de guardar se vuelve a entrar por el menú, así el
+                # sitio queda limpio y no arrastra nada a la persona siguiente.
                 navegar_a_trabajadores_por_menu(page)
-                grupo_actual = None  # se perdió al navegar, hay que reseleccionarlo
+                grupo_actual = None  # al navegar se pierde, hay que reelegirlo
             elif resultado.estado.startswith("SIMULADO"):
-                # Modo prueba (--no-guardar). Si es la ÚLTIMA fila, se deja el
-                # formulario abierto para poder revisarlo en pantalla; si hay
-                # más filas, se descarta con un reload duro para que la
-                # siguiente arranque de cero (dejarlo abierto, o resetear por
-                # menú tras un form sin guardar, rompía la fila siguiente).
+                # En modo prueba: al último se deja el formulario abierto para
+                # poder mirarlo, y si quedan más personas se recarga la página
+                # para que la siguiente empiece de cero.
                 if i < len(df) - 1:
                     cerrar_formulario(page)
                     asegurar_pagina_trabajadores(page)
@@ -845,7 +730,7 @@ def main():
         print(f"⚠ {docs_incompletos} persona(s) con documentos faltantes del set estándar "
               f"— revisar el detalle de cada fila en {args.output}.")
 
-    # En modo prueba dejamos el navegador y el formulario intactos para revisión.
+    # En modo prueba se deja el navegador abierto para poder revisar.
     if not NO_GUARDAR:
         browser.close()
     playwright.stop()
