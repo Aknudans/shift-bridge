@@ -44,10 +44,16 @@ quien prefiera la consola.
 python buscar_y_comparar.py --input colaboradores.xlsx --output reporte.xlsx
 ```
 
-No hay tests, linter ni build configurados — son scripts autocontenidos (más
-un módulo de soporte compartido). La única forma de "probar" un cambio es
-correrlo contra el sitio real (idealmente con pausas visibles, ver sección
-8.2) con un Excel de pocas filas.
+**Tests**: `python test_datos.py` (o `python -m pytest test_datos.py`) cubre
+las funciones puras — las que interpretan el Excel y las que mapean nombre de
+archivo → tipo de documento (`normalizar_sexo`, `formatear_fecha`,
+`autocompletar_campos_negocio`, `_norm`, `tipo_desde_nombre_archivo`,
+`_buscar_carpeta_persona`, `preparar_items_carpeta`). No abre Chrome ni entra
+al sitio: se puede correr en cualquier momento, sin sesión y sin riesgo.
+**Correrlo siempre después de tocar `_MAPEO_NOMBRE_TIPO`.** Todo lo demás
+(navegación, selectores, timing) NO tiene tests y solo se puede validar
+corriéndolo contra el sitio real con un Excel de pocas filas (ver sección
+8.2). No hay linter ni build configurados.
 
 **Arquitectura**: `shift_common.py` concentra lo compartido entre
 `buscar_y_comparar.py` (Fase 1) y `crear_o_editar.py` (Fase 2) — conexión a
@@ -588,6 +594,9 @@ interfaz.py             — interfaz gráfica (customtkinter) de escritorio: ele
                           documentos), Excel y carpeta, botón "Abrir Chrome",
                           log en vivo y barra de progreso. Corre los scripts
                           como subproceso (no reimplementa su lógica). Ver 12.11.
+test_datos.py           — pruebas de las funciones puras (Excel + mapeo de
+                          nombres de archivo a tipos). No toca el navegador.
+                          Correr con `python test_datos.py`. Ver sección 0.
 ejecutar_interfaz.bat   — launcher de un click para interfaz.py.
 app_entry.py            — punto de entrada único del .exe empaquetado (ver
                           12.15): sin argumentos abre la interfaz, con
@@ -1184,9 +1193,14 @@ documentos (solo visible en modo "Subir documentos"), checkbox
 negocio**: corre `buscar_y_comparar.py`/`crear_o_editar.py` como subproceso
 (`sys.executable -u ...`) en un hilo aparte y muestra su stdout, para no
 duplicar/arriesgar romper la automatización ya probada. Launcher:
-`ejecutar_interfaz.bat`. Los flags `--limpiar-documentos` y
-`--verificar-documentos` (ver 12.12) todavía NO están expuestos en la
-interfaz, solo por CLI — pendiente si se necesitan seguido.
+`ejecutar_interfaz.bat`.
+
+**Actualizado 10/09/2026**: `--limpiar-documentos` y `--verificar-documentos`
+(ver 12.12) YA están expuestos en la interfaz — un checkbox para "verificar" y
+un menú de 3 opciones (No tocarlos / Solo anotarlos / Borrarlos) para
+"limpiar". Ambos solo aparecen fuera del modo Comparación, que es de solo
+lectura. La opción de BORRAR pide una confirmación extra al apretar Iniciar,
+por ser lo único irreversible de toda la app.
 
 ### 12.12 Anti-duplicado y verificación de documentos existentes (08/09/2026)
 
@@ -1392,9 +1406,31 @@ interfaz gráfica `interfaz.py` (12.11) ya implementados y validados en vivo.
 3. **Completar `_MAPEO_NOMBRE_TIPO`** (`documentos.py`) para archivos que
    aparezcan en otras carpetas y no estén cubiertos (hoy cubre el set
    estándar de 8 confirmado en "Adan_Leon"/"Ariel_Diaz"/"Francisco_Alvarez").
-   Ir agregando patrones a medida que aparezcan.
-4. **Exponer `--limpiar-documentos` y `--verificar-documentos` en
-   `interfaz.py`** (hoy solo por CLI, ver 12.11).
+   Ir agregando patrones a medida que aparezcan, y correr `test_datos.py`
+   después de cada cambio.
+4. ~~Exponer `--limpiar-documentos` y `--verificar-documentos` en
+   `interfaz.py`~~ → HECHO 10/09/2026, ver 12.11.
+
+### Resueltos 10/09/2026 (sesión de endurecimiento previo a la entrega)
+- **Ruta de Chrome ya no está hardcodeada.** `interfaz.py` y los 3 `.bat`
+  asumían `C:\Program Files\Google\Chrome\Application\chrome.exe`. En un
+  equipo con Chrome de 32 bits o instalado por usuario, "Abrir Chrome" fallaba
+  sin explicación — bug de despliegue que NO se manifiesta en el equipo de
+  desarrollo, solo en el del otro usuario. Ahora se prueban las 3 ubicaciones
+  habituales (`%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LOCALAPPDATA%`); la
+  interfaz además ofrece buscar el `chrome.exe` a mano si no aparece en
+  ninguna, y recuerda esa ruta por el resto de la sesión.
+- **`test_datos.py`** (nuevo, ver sección 0): cubre las funciones puras.
+- **Flags de documentos expuestos en la interfaz** (ver 12.11).
+
+Evaluados y NO hechos a propósito (no aportan hoy y sí agregan riesgo sobre
+código ya validado en vivo): sacar los globales `NO_GUARDAR`/`LIMPIAR_
+DOCUMENTOS`/etc. de `crear_o_editar.py` a un dataclass de opciones (funciona
+porque es un proceso por corrida; el riesgo real aparece solo si algún día se
+llama `main()` dos veces en el mismo proceso), y partir el `main()` de
+`crear_o_editar.py` (~200 líneas) en un `procesar_fila()`. Retomar el segundo
+si el archivo sigue creciendo — y recién después de tener más cobertura de
+tests.
 
 ### Prioridad BAJA / a revisar
 5. **Período de tipos Mensual/Anual** (Liquidaciones, EPP anual): para tipos

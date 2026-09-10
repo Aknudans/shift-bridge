@@ -22,12 +22,43 @@ CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # El mismo Chrome de depuración que abren los .bat: un solo perfil aparte,
 # compartido por todos los modos, para no chocar con el Chrome de siempre.
-CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 CHROME_PROFILE_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "ChromeDebugShiftLaboral"
 )
 CHROME_DEBUG_PORT = 9222
 SHIFT_URL = "https://externoslof.shiftlabor.com/"
+
+# Chrome no siempre está en el mismo lugar: cambia entre la versión de 64 y 32
+# bits y la que se instala solo para un usuario. Se prueban las tres, y si no
+# aparece en ninguna se le pregunta a la persona dónde está.
+CHROME_CANDIDATOS = [
+    os.path.join(base, r"Google\Chrome\Application\chrome.exe")
+    for base in (
+        os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+        os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    )
+]
+
+# Una vez encontrado, se recuerda para no volver a preguntar en esta sesión.
+_chrome_recordado = None
+
+
+def _buscar_chrome() -> str:
+    global _chrome_recordado
+    if _chrome_recordado and os.path.isfile(_chrome_recordado):
+        return _chrome_recordado
+    for ruta in CHROME_CANDIDATOS:
+        if os.path.isfile(ruta):
+            _chrome_recordado = ruta
+            return ruta
+    return ""
+
+# Las tres opciones del menú de documentos anteriores, tal como se leen en
+# pantalla. Se traducen al flag correspondiente al armar el comando.
+LIMPIAR_NO_TOCAR = "No tocarlos"
+LIMPIAR_LISTAR = "Solo anotarlos en el reporte"
+LIMPIAR_BORRAR = "Borrarlos (no se puede deshacer)"
 
 RE_PROGRESO = re.compile(r"^\[(\d+)/(\d+)\]")
 RE_RESUMEN = re.compile(r"^Resumen:")
@@ -53,8 +84,8 @@ class InterfazBot(ctk.CTk):
         super().__init__()
 
         self.title("Bot ShiftLaboral")
-        self.geometry("880x680")
-        self.minsize(760, 560)
+        self.geometry("880x760")
+        self.minsize(760, 620)
         try:
             self.iconbitmap(_ruta_icono())
         except Exception:
@@ -128,16 +159,38 @@ class InterfazBot(ctk.CTk):
             self.fila_carpeta_docs, "Carpeta de documentos:", self._elegir_carpeta_docs
         )
 
-        # La corrida de prueba, que llena todo pero no guarda nada.
+        # La corrida de prueba y las dos opciones de documentos.
         marco_opciones = ctk.CTkFrame(self)
         marco_opciones.pack(fill="x", **pad)
         self.var_no_guardar = ctk.BooleanVar(value=False)
         self.check_no_guardar = ctk.CTkCheckBox(
             marco_opciones,
-            text="Modo prueba: llenar el formulario pero NO guardar (--no-guardar)",
+            text="Modo prueba: llenar el formulario pero NO guardar",
             variable=self.var_no_guardar,
         )
-        self.check_no_guardar.pack(anchor="w", padx=10, pady=8)
+        self.check_no_guardar.pack(anchor="w", padx=10, pady=(8, 4))
+
+        self.var_verificar_docs = ctk.BooleanVar(value=False)
+        self.check_verificar_docs = ctk.CTkCheckBox(
+            marco_opciones,
+            text="Anotar en el reporte qué documentos tiene ya cada persona (no sube ni borra nada)",
+            variable=self.var_verificar_docs,
+        )
+        self.check_verificar_docs.pack(anchor="w", padx=10, pady=4)
+
+        # Borrar documentos es lo único irreversible de toda la app, así que va
+        # apagado por default y vuelve a pedir confirmación al iniciar.
+        self.fila_limpiar = ctk.CTkFrame(marco_opciones, fg_color="transparent")
+        self.fila_limpiar.pack(fill="x", padx=10, pady=(4, 8))
+        ctk.CTkLabel(
+            self.fila_limpiar, text="Documentos anteriores de quienes ya existían:",
+            anchor="w",
+        ).pack(side="left")
+        self.var_limpiar_docs = ctk.StringVar(value=LIMPIAR_NO_TOCAR)
+        ctk.CTkOptionMenu(
+            self.fila_limpiar, width=260, variable=self.var_limpiar_docs,
+            values=[LIMPIAR_NO_TOCAR, LIMPIAR_LISTAR, LIMPIAR_BORRAR],
+        ).pack(side="left", padx=8)
 
         # Botones de iniciar y cortar, con la barra de avance al lado.
         marco_accion = ctk.CTkFrame(self)
@@ -190,11 +243,19 @@ class InterfazBot(ctk.CTk):
         else:
             self.fila_carpeta_docs.pack_forget()
 
+        # El modo de comparación es de solo lectura: ninguna de estas opciones
+        # tiene sentido ahí, así que se apagan y se dejan grises.
         if modo == "comparar":
             self.check_no_guardar.configure(state="disabled")
             self.var_no_guardar.set(False)
+            self.check_verificar_docs.configure(state="disabled")
+            self.var_verificar_docs.set(False)
+            self.var_limpiar_docs.set(LIMPIAR_NO_TOCAR)
+            self.fila_limpiar.pack_forget()
         else:
             self.check_no_guardar.configure(state="normal")
+            self.check_verificar_docs.configure(state="normal")
+            self.fila_limpiar.pack(fill="x", padx=10, pady=(4, 8))
 
         # Se sugiere un nombre de reporte según el modo, pero sin pisar el
         # que la persona haya escrito a mano.
@@ -239,11 +300,28 @@ class InterfazBot(ctk.CTk):
     # la persona a mano: el bot nunca ve ni guarda la clave.
 
     def _abrir_chrome(self):
+        global _chrome_recordado
+        chrome = _buscar_chrome()
+        if not chrome:
+            messagebox.showinfo(
+                "No se encontró Chrome",
+                "No se encontró Chrome en las ubicaciones habituales.\n\n"
+                "En la ventana siguiente, buscar el archivo chrome.exe "
+                "(normalmente en Archivos de programa \\ Google \\ Chrome \\ Application).",
+            )
+            chrome = filedialog.askopenfilename(
+                title="Buscar chrome.exe",
+                filetypes=[("Chrome", "chrome.exe"), ("Programas", "*.exe")],
+            )
+            if not chrome:
+                return
+            _chrome_recordado = chrome
+
         try:
             os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
             subprocess.Popen(
                 [
-                    CHROME_EXE,
+                    chrome,
                     f"--remote-debugging-port={CHROME_DEBUG_PORT}",
                     f"--user-data-dir={CHROME_PROFILE_DIR}",
                     SHIFT_URL,
@@ -252,12 +330,6 @@ class InterfazBot(ctk.CTk):
             self._log(
                 "Se abrió Chrome de depuración. Iniciar sesión manualmente en la "
                 "ventana que se abrió (el bot nunca ve ni guarda la clave)."
-            )
-        except FileNotFoundError:
-            messagebox.showerror(
-                "No se encontró Chrome",
-                f"No se encontró Chrome en:\n{CHROME_EXE}\n\n"
-                "Abrilo manualmente con --remote-debugging-port=9222.",
             )
         except Exception as e:
             messagebox.showerror("Error al abrir Chrome", str(e))
@@ -300,6 +372,13 @@ class InterfazBot(ctk.CTk):
         comando = self._comando_base_modo("--modo-crear") + ["--input", excel, "--output", salida]
         if self.var_no_guardar.get():
             comando.append("--no-guardar")
+        if self.var_verificar_docs.get():
+            comando.append("--verificar-documentos")
+        limpiar = self.var_limpiar_docs.get()
+        if limpiar == LIMPIAR_LISTAR:
+            comando += ["--limpiar-documentos", "listar"]
+        elif limpiar == LIMPIAR_BORRAR:
+            comando += ["--limpiar-documentos", "borrar"]
         if modo == "documentos":
             carpeta = self.entry_carpeta_docs.get().strip()
             comando += ["--subir-documentos", carpeta]
@@ -313,6 +392,21 @@ class InterfazBot(ctk.CTk):
         if error:
             messagebox.showwarning("Falta información", error)
             return
+
+        # Borrar documentos no se puede deshacer, así que se pregunta de nuevo
+        # aunque ya esté elegido en el menú.
+        if self.var_limpiar_docs.get() == LIMPIAR_BORRAR:
+            confirmar = messagebox.askyesno(
+                "Borrar documentos anteriores",
+                "A cada persona que YA EXISTÍA en ShiftLaboral se le van a BORRAR "
+                "los documentos que subió el proveedor.\n\n"
+                "Esto no se puede deshacer. Los documentos cargados por el mandante "
+                "no se tocan.\n\n"
+                "¿Confirma?",
+                icon="warning",
+            )
+            if not confirmar:
+                return
 
         comando = self._armar_comando()
         self.total_filas = None

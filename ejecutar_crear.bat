@@ -13,7 +13,21 @@ REM Se usa un --user-data-dir propio para no chocar con las ventanas de
 REM Chrome normales. La sesion queda guardada entre corridas: solo hace
 REM falta iniciar sesion la primera vez.
 echo [1/4] Abriendo Chrome en modo depuracion (perfil separado)...
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\ChromeDebugShiftLaboral" "https://externoslof.shiftlabor.com/"
+
+REM Chrome no siempre esta en el mismo lugar: cambia entre la version de 64 y
+REM 32 bits y la que se instala solo para un usuario. Se prueban las tres.
+set "CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" set "CHROME=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" set "CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" (
+    echo ERROR: no se encontro chrome.exe en las ubicaciones habituales.
+    echo Abrir Chrome manualmente con:
+    echo   chrome.exe --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\ChromeDebugShiftLaboral"
+    pause
+    exit /b 1
+)
+
+start "" "%CHROME%" --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\ChromeDebugShiftLaboral" "https://externoslof.shiftlabor.com/"
 
 echo.
 echo ============================================================

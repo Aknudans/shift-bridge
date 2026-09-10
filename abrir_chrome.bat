@@ -16,9 +16,22 @@ echo     --subir-documentos o --no-guardar        -> abrir Chrome con ESTE .bat
 echo     primero, iniciar sesion, y despues correr el comando.
 echo.
 
+REM Chrome no siempre esta en el mismo lugar: cambia entre la version de 64 y
+REM 32 bits y la que se instala solo para un usuario. Se prueban las tres.
+set "CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" set "CHROME=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" set "CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" (
+    echo ERROR: no se encontro chrome.exe en las ubicaciones habituales.
+    echo Abrir Chrome manualmente con:
+    echo   chrome.exe --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\ChromeDebugShiftLaboral"
+    pause
+    exit /b 1
+)
+
 REM Si ya hay un Chrome con este perfil abierto, esto solo abre una pestaña
 REM (no relanza el puerto). Con una vez por sesion alcanza.
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\ChromeDebugShiftLaboral" "https://externoslof.shiftlabor.com/"
+start "" "%CHROME%" --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\ChromeDebugShiftLaboral" "https://externoslof.shiftlabor.com/"
 
 echo ============================================================
 echo   ACCION REQUERIDA:
