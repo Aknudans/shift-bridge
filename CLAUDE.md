@@ -587,8 +587,10 @@ abrir_chrome.bat        — SOLO abre el Chrome de depuración (puerto 9222,
 documentos.py           — módulo Fase 2 opcional: limpieza (--limpiar-documentos),
                           verificación (tipos_documentos_existentes) y carga
                           masiva (--subir-documentos) de documentos del
-                          trabajador. Ver secciones 12.8-12.13. NO se ejecuta
-                          solo, lo importa crear_o_editar.py.
+                          trabajador. Ver secciones 12.8-12.13 y 12.16 (las 3
+                          cosas en una sola visita a la vista de documentos:
+                          gestionar_documentos_trabajador). NO se ejecuta solo,
+                          lo importa crear_o_editar.py.
 interfaz.py             — interfaz gráfica (customtkinter) de escritorio: elegir
                           modo (Comparación / Creación-edición / Subir
                           documentos), Excel y carpeta, botón "Abrir Chrome",
@@ -1431,6 +1433,53 @@ llama `main()` dos veces en el mismo proceso), y partir el `main()` de
 `crear_o_editar.py` (~200 líneas) en un `procesar_fila()`. Retomar el segundo
 si el archivo sigue creciendo — y recién después de tener más cobertura de
 tests.
+
+### 12.16 Una sola visita a la vista de documentos por persona (10/09/2026)
+
+🔴 **Optimización de tiempo, la más grande del proyecto.** Los tres flags de
+documentos (`--limpiar-documentos`, `--verificar-documentos`,
+`--subir-documentos`) llamaban cada uno a su propia función pública, y las tres
+empezaban por `_abrir_vista_documentos()`: `goto(BASE_URL)` → `networkidle` →
+`seleccionar_grupo_proveedor` → esperar overlay → `buscar_rut` → clic en el RUT
+→ `networkidle` → `sleep(1.0)`. Son ~2,5s de esperas fijas más 4 `networkidle`
+más 3 cargas reales: **10-15s por visita**. Pedir los tres flags hacía ese
+mismo camino 3 veces seguidas para la misma persona. Encima
+`--verificar-documentos` leía la tabla de tipos (paginándola entera) y después
+`subir_documentos_trabajador` la volvía a leer por dentro.
+
+**Fix**: se separó "navegar hasta la vista" de "trabajar sobre la vista".
+- Nuevas internas en `documentos.py`, todas asumen la vista YA abierta y la
+  dejan abierta: `_limpiar_en_vista_abierta`, `_subir_en_vista_abierta`
+  (+ `_leer_tipos_en_vista_abierta`, que ya existía). `_volver_a_trabajadores`
+  centraliza la salida.
+- **`gestionar_documentos_trabajador(page, rut, grupo, limpiar=, verificar=,
+  items=, ...)`**: abre la vista UNA vez, hace lo que se le pida en el orden
+  correcto (**borrar → leer tipos → subir**; ese orden importa: si se leyera
+  antes de borrar, lo recién borrado contaría como "ya lo tenía" y se saltearía
+  la subida), y vuelve a la grilla en un `finally`. La lectura de tipos se hace
+  **una sola vez** y se le pasa a la subida por `tipos_ya_leidos`.
+- Las 3 funciones públicas viejas (`limpiar_documentos_trabajador`,
+  `tipos_documentos_existentes`, `subir_documentos_trabajador`) **siguen
+  existiendo** como envoltorios finos (navegan, llaman a la interna, vuelven) —
+  no se rompió ninguna firma, y sirven de alternativa si la versión combinada
+  diera problemas.
+- `crear_o_editar.py`: los 3 bloques del bucle se unificaron en uno. La carpeta
+  de la persona se busca ANTES de navegar, así que si no existe no se entra a
+  la vista de documentos en absoluto. Las líneas del reporte quedaron
+  idénticas; se extrajo `_notas_documentos()` para armarlas.
+
+De 3 navegaciones + 2 lecturas de tabla a **1 navegación + 1 lectura**. En un
+lote de 20 personas con los tres flags, del orden de 10 minutos menos.
+
+⚠️ **Falta validarlo contra el sitio real.** `test_datos.py` cubre el orden de
+las llamadas, que se navega una sola vez, que los tipos no se releen y las
+líneas del reporte — pero con las funciones internas simuladas, sin navegador.
+Lo que NO está probado es que el sitio aguante hacer las tres cosas seguidas
+sin el "reseteo" implícito que daba renavegar entre una y otra (por eso
+`_subir_en_vista_abierta` arranca con `_cerrar_dialogo_abierto` +
+`_esperar_sin_overlays`, por si el borrado dejó algún aviso tapando el botón de
+carga masiva). **Probar primero con UNA persona y los tres flags juntos** antes
+de usarlo en un lote grande.
 
 ### Prioridad BAJA / a revisar
 5. **Período de tipos Mensual/Anual** (Liquidaciones, EPP anual): para tipos

@@ -36,9 +36,11 @@ _JS_PRIMERA_BORRABLE = """() => {
 }"""
 
 
-# Llega hasta la pantalla de documentos de una persona: elige el grupo, filtra
-# por RUT y hace clic en el RUT, que es el enlace que lleva ahí. Avisa con
-# False si esa persona no aparece en la lista.
+# Llegar a la pantalla de documentos de una persona y volver de ahí. Es el
+# camino más caro de todo el bot (recarga, elegir grupo, filtrar y entrar), así
+# que conviene hacerlo una sola vez por persona y aprovechar la visita para
+# todo lo que haya que hacerle: ver ese `gestionar_documentos_trabajador`.
+
 def _abrir_vista_documentos(page: Page, rut: str, grupo_proveedor: str) -> bool:
     page.goto(BASE_URL)
     page.wait_for_load_state("networkidle")
@@ -61,6 +63,11 @@ def _abrir_vista_documentos(page: Page, rut: str, grupo_proveedor: str) -> bool:
         pass
     time.sleep(1.0)
     return True
+
+
+def _volver_a_trabajadores(page: Page):
+    page.goto(BASE_URL)
+    page.wait_for_load_state("networkidle")
 
 
 # Esta pantalla se llena de capas grises que se comen los clics: la de
@@ -145,14 +152,10 @@ def _ir_a_pagina(page: Page, n: int) -> bool:
 # Deja sin documentación a alguien que ya venía cargado de antes. Solo se
 # pueden tocar los documentos que subió el proveedor: los que puso el mandante
 # ni siquiera tienen botón de borrar. Con borrar=False solo se listan.
-# Se van borrando de a uno, aceptando el aviso de cada uno, y al terminar se
-# vuelve a la lista de trabajadores.
-def limpiar_documentos_trabajador(
-    page: Page, rut: str, grupo_proveedor: str, borrar: bool = False
-) -> tuple[str, list[str]]:
-    if not _abrir_vista_documentos(page, rut, grupo_proveedor):
-        return ("sin_rut", [])
-
+# Se van borrando de a uno, aceptando el aviso de cada uno.
+# Da por hecho que la pantalla de documentos ya está abierta y la deja abierta:
+# quien llama se encarga de llegar hasta ahí y de salir.
+def _limpiar_en_vista_abierta(page: Page, borrar: bool = False) -> tuple[str, list[str]]:
     # Se para en la primera página donde todavía quede algo por borrar.
     def _pagina_con_borrable():
         for pg_n in range(1, _total_paginas(page) + 1):
@@ -167,8 +170,6 @@ def limpiar_documentos_trabajador(
         for pg_n in range(1, _total_paginas(page) + 1):
             _ir_a_pagina(page, pg_n)
             vistos.extend(page.evaluate(_JS_LISTAR))
-        page.goto(BASE_URL)
-        page.wait_for_load_state("networkidle")
         return ("listado", vistos)
 
     borrados: list[str] = []
@@ -217,9 +218,19 @@ def limpiar_documentos_trabajador(
         borrados.append(etiqueta)
 
     _cerrar_dialogo_abierto(page)
-    page.goto(BASE_URL)
-    page.wait_for_load_state("networkidle")
     return ("borrado", borrados)
+
+
+# Versión suelta de lo anterior, para usarla sola: navega hasta la persona,
+# hace la limpieza y vuelve a la lista de trabajadores.
+def limpiar_documentos_trabajador(
+    page: Page, rut: str, grupo_proveedor: str, borrar: bool = False
+) -> tuple[str, list[str]]:
+    if not _abrir_vista_documentos(page, rut, grupo_proveedor):
+        return ("sin_rut", [])
+    resultado = _limpiar_en_vista_abierta(page, borrar)
+    _volver_a_trabajadores(page)
+    return resultado
 
 
 # Saca el tipo de cada documento cargado, sin importar quién lo haya subido.
@@ -242,15 +253,13 @@ def _leer_tipos_en_vista_abierta(page: Page) -> list[str]:
     return tipos
 
 
-# Lista todo lo que la persona ya tiene cargado. No sube ni borra nada: sirve
-# para revisar antes de subir, y también lo usa la subida por dentro para no
-# repetir documentos.
+# Versión suelta de lo anterior, para usarla sola: navega hasta la persona,
+# lee lo que tiene cargado y vuelve. No sube ni borra nada.
 def tipos_documentos_existentes(page: Page, rut: str, grupo_proveedor: str) -> tuple[str, list[str]]:
     if not _abrir_vista_documentos(page, rut, grupo_proveedor):
         return ("sin_rut", [])
     tipos = _leer_tipos_en_vista_abierta(page)
-    page.goto(BASE_URL)
-    page.wait_for_load_state("networkidle")
+    _volver_a_trabajadores(page)
     return ("listado", tipos)
 
 
@@ -469,21 +478,22 @@ def _guardar_carga_masiva(page: Page) -> bool:
 # rechaza, se completa con la fecha de contratación y se reintenta. La fecha
 # de vencimiento en cambio siempre hay que ponerla, el sitio no la perdona.
 # Con guardar=False se llena todo pero se cancela, para poder mirar sin subir.
-def subir_documentos_trabajador(
-    page: Page, rut: str, grupo_proveedor: str,
-    items, periodo_ddmmaaaa: str, vencimiento_ddmmaaaa: str = "",
+# Da por hecho que la pantalla ya está abierta y la deja abierta.
+# `tipos_ya_leidos` sirve para no releer la tabla cuando quien llama acaba de
+# leerla: paginarla de nuevo es caro y no habría cambiado nada.
+def _subir_en_vista_abierta(
+    page: Page, items, periodo_ddmmaaaa: str, vencimiento_ddmmaaaa: str = "",
     guardar: bool = True, dejar_periodo_vacio: bool = True,
-    omitir_existentes: bool = True,
+    omitir_existentes: bool = True, tipos_ya_leidos=None,
 ):
     if not items:
         return ("sin_items", [], [], [])
-    if not _abrir_vista_documentos(page, rut, grupo_proveedor):
-        return ("sin_rut", [], [], [])
 
     ya_existian: list[str] = []
     items_a_subir = items
     if omitir_existentes:
-        tipos_actuales_norm = {normalizar_texto(t) for t in _leer_tipos_en_vista_abierta(page)}
+        tipos = tipos_ya_leidos if tipos_ya_leidos is not None else _leer_tipos_en_vista_abierta(page)
+        tipos_actuales_norm = {normalizar_texto(t) for t in tipos}
         items_a_subir = []
         for it in items:
             if normalizar_texto(it["tipo"]) in tipos_actuales_norm:
@@ -492,9 +502,12 @@ def subir_documentos_trabajador(
                 items_a_subir.append(it)
 
     if not items_a_subir:
-        page.goto(BASE_URL)
-        page.wait_for_load_state("networkidle")
         return ("sin_items_nuevos", [], ya_existian, [])
+
+    # Si antes de esto hubo un borrado, puede haber quedado algún aviso abierto
+    # tapando el botón de carga masiva.
+    _cerrar_dialogo_abierto(page)
+    _esperar_sin_overlays(page)
 
     errores = []
     page.locator(SEL_BTN_CM).first.click(timeout=8000)
@@ -530,8 +543,6 @@ def subir_documentos_trabajador(
             page.locator(SEL_CM_CANCELAR).first.click(timeout=5000)
         except Exception:
             pass
-        page.goto(BASE_URL)
-        page.wait_for_load_state("networkidle")
         return ("simulado", subidos, ya_existian, errores)
 
     accion = "subido"
@@ -554,6 +565,75 @@ def subir_documentos_trabajador(
             except Exception:
                 pass
 
-    page.goto(BASE_URL)
-    page.wait_for_load_state("networkidle")
     return (accion, subidos, ya_existian, errores)
+
+
+# Versión suelta de lo anterior, para usarla sola: navega hasta la persona,
+# sube y vuelve a la lista de trabajadores.
+def subir_documentos_trabajador(
+    page: Page, rut: str, grupo_proveedor: str,
+    items, periodo_ddmmaaaa: str, vencimiento_ddmmaaaa: str = "",
+    guardar: bool = True, dejar_periodo_vacio: bool = True,
+    omitir_existentes: bool = True,
+):
+    if not items:
+        return ("sin_items", [], [], [])
+    if not _abrir_vista_documentos(page, rut, grupo_proveedor):
+        return ("sin_rut", [], [], [])
+    resultado = _subir_en_vista_abierta(
+        page, items, periodo_ddmmaaaa, vencimiento_ddmmaaaa,
+        guardar=guardar, dejar_periodo_vacio=dejar_periodo_vacio,
+        omitir_existentes=omitir_existentes)
+    _volver_a_trabajadores(page)
+    return resultado
+
+
+# Le hace a una persona TODO lo que haya que hacerle con sus documentos en una
+# sola visita: limpiar los viejos, anotar los que tiene y subir los nuevos.
+# Antes cada una de esas tres cosas navegaba por su cuenta hasta la misma
+# pantalla, y llegar ahí es lo más lento del bot: pedir las tres significaba
+# hacer tres veces el mismo camino y leer dos veces la misma tabla.
+#
+# El orden importa: primero se borra lo viejo, después se mira qué quedó, y
+# recién entonces se sube — así lo que se acaba de borrar no cuenta como "ya lo
+# tenía" y no se saltea la subida.
+#
+# Devuelve un diccionario con lo que se haya hecho; las claves que no
+# correspondan vienen en None, para que quien llama sepa distinguir "no se
+# pidió" de "se pidió y no encontró nada".
+def gestionar_documentos_trabajador(
+    page: Page, rut: str, grupo_proveedor: str,
+    limpiar=None, verificar: bool = False, items=None,
+    periodo_ddmmaaaa: str = "", vencimiento_ddmmaaaa: str = "",
+    guardar: bool = True, omitir_existentes: bool = True,
+):
+    resultado = {"sin_rut": False, "limpieza": None, "tipos": None, "subida": None}
+    if not (limpiar or verificar or items):
+        return resultado
+
+    if not _abrir_vista_documentos(page, rut, grupo_proveedor):
+        resultado["sin_rut"] = True
+        return resultado
+
+    try:
+        if limpiar:
+            resultado["limpieza"] = _limpiar_en_vista_abierta(page, borrar=(limpiar == "borrar"))
+
+        # Se lee una sola vez y se reusa para la subida, que necesita lo mismo.
+        tipos = None
+        if verificar or (items and omitir_existentes):
+            tipos = _leer_tipos_en_vista_abierta(page)
+            if verificar:
+                resultado["tipos"] = tipos
+
+        if items:
+            resultado["subida"] = _subir_en_vista_abierta(
+                page, items, periodo_ddmmaaaa, vencimiento_ddmmaaaa,
+                guardar=guardar, omitir_existentes=omitir_existentes,
+                tipos_ya_leidos=tipos)
+    finally:
+        # Pase lo que pase hay que volver a la lista, o la fila siguiente
+        # arranca parada en la pantalla equivocada.
+        _volver_a_trabajadores(page)
+
+    return resultado

@@ -145,6 +145,96 @@ def test_preparar_items_carpeta():
         shutil.rmtree(base, ignore_errors=True)
 
 
+# Las notas que salen en el reporte y en la consola. Se prueban porque son lo
+# único que la persona que revisa el lote llega a ver.
+def test_notas_documentos():
+    from crear_o_editar import _notas_documentos
+
+    # Si no se pudo entrar, una sola línea y nada más.
+    notas, faltan = _notas_documentos(
+        {"sin_rut": True, "limpieza": None, "tipos": None, "subida": None}, [])
+    assert len(notas) == 1 and "no se pudo abrir" in notas[0]
+    assert not faltan
+
+    # Las tres cosas juntas dan tres líneas, en orden.
+    docs = {
+        "sin_rut": False,
+        "limpieza": ("borrado", ["Contrato | 01/01/2026"]),
+        "tipos": ["Cédula de Identidad"],
+        "subida": ("subido", ["Cédula de Identidad"], [], []),
+    }
+    notas, faltan = _notas_documentos(docs, [])
+    assert len(notas) == 3
+    assert notas[0].startswith("Docs BORRADOS (1):")
+    assert notas[1].startswith("Docs actuales (1):")
+    assert notas[2].startswith("Docs SUBIDOS (1):")
+    # Del set estándar de 8 subió uno solo, así que tiene que avisar.
+    assert faltan and "FALTAN documentos del set" in notas[2]
+
+    # "listado" es mirar sin borrar, y lo que ya tenía no se re-sube.
+    docs = {
+        "sin_rut": False,
+        "limpieza": ("listado", []),
+        "tipos": None,
+        "subida": ("sin_items_nuevos", [], ["Cédula de Identidad"], []),
+    }
+    notas, _ = _notas_documentos(docs, ["foto.jpg (no calza)"])
+    assert notas[0] == "Docs borrables (0): ninguno"
+    assert "nada nuevo que subir" in notas[1]
+    assert "ya tenía, no se re-subió (1)" in notas[1]
+    assert "omitidos: foto.jpg (no calza)" in notas[1]
+
+
+# El punto de toda la optimización: una sola visita a la pantalla de
+# documentos por persona, en el orden correcto, y volviendo siempre a la lista.
+def test_gestionar_documentos_una_sola_visita():
+    import documentos as doc
+
+    llamadas = []
+    originales = {n: getattr(doc, n) for n in (
+        "_abrir_vista_documentos", "_limpiar_en_vista_abierta",
+        "_leer_tipos_en_vista_abierta", "_subir_en_vista_abierta",
+        "_volver_a_trabajadores")}
+
+    def _registrar(nombre, retorno):
+        def _fake(*a, **k):
+            llamadas.append(nombre)
+            if nombre == "_subir_en_vista_abierta":
+                # Tiene que recibir los tipos ya leídos, no volver a leerlos.
+                assert k.get("tipos_ya_leidos") == ["Cédula de Identidad"]
+            return retorno
+        return _fake
+
+    doc._abrir_vista_documentos = _registrar("_abrir_vista_documentos", True)
+    doc._limpiar_en_vista_abierta = _registrar("_limpiar_en_vista_abierta", ("borrado", []))
+    doc._leer_tipos_en_vista_abierta = _registrar(
+        "_leer_tipos_en_vista_abierta", ["Cédula de Identidad"])
+    doc._subir_en_vista_abierta = _registrar(
+        "_subir_en_vista_abierta", ("subido", [], [], []))
+    doc._volver_a_trabajadores = _registrar("_volver_a_trabajadores", None)
+
+    try:
+        doc.gestionar_documentos_trabajador(
+            page=None, rut="1-9", grupo_proveedor="Grupo X",
+            limpiar="borrar", verificar=True, items=[{"tipo": "Anexos"}])
+
+        assert llamadas == [
+            "_abrir_vista_documentos",
+            "_limpiar_en_vista_abierta",
+            "_leer_tipos_en_vista_abierta",
+            "_subir_en_vista_abierta",
+            "_volver_a_trabajadores",
+        ], llamadas
+
+        # Si no se pide nada, no se navega: es lo que ahorra el tiempo.
+        llamadas.clear()
+        doc.gestionar_documentos_trabajador(page=None, rut="1-9", grupo_proveedor="Grupo X")
+        assert llamadas == []
+    finally:
+        for nombre, fn in originales.items():
+            setattr(doc, nombre, fn)
+
+
 # Corre todas las pruebas sin necesidad de instalar pytest.
 def main():
     pruebas = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

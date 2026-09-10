@@ -46,10 +46,8 @@ from campos_formulario import (
 from documentos import (
     _norm as _norm_texto,
     DOCUMENTOS_SET_ESTANDAR,
-    limpiar_documentos_trabajador,
+    gestionar_documentos_trabajador,
     preparar_items_carpeta,
-    subir_documentos_trabajador,
-    tipos_documentos_existentes,
 )
 
 # Selectores de esta fase, la que crea y edita gente.
@@ -171,6 +169,57 @@ def autocompletar_campos_negocio(df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, "_sueldo_autocompletado"] = True
 
     return df
+
+
+# Traduce lo que devolvió la gestión de documentos a las líneas que se leen en
+# el reporte y en la consola. Avisa además si a la persona le faltó alguno de
+# los documentos habituales, para el conteo del resumen final.
+def _notas_documentos(docs: dict, omitidos: list) -> tuple[list[str], bool]:
+    if docs["sin_rut"]:
+        return ["Docs: no se pudo abrir la vista (RUT no está en la grilla)"], False
+
+    notas = []
+    faltan = False
+
+    if docs["limpieza"]:
+        accion, lista = docs["limpieza"]
+        verbo = "Docs borrables" if accion == "listado" else "Docs BORRADOS"
+        notas.append(f"{verbo} ({len(lista)}): " + (" ; ".join(lista) if lista else "ninguno"))
+
+    if docs["tipos"] is not None:
+        tipos = docs["tipos"]
+        notas.append(f"Docs actuales ({len(tipos)}): "
+                     + (", ".join(tipos) if tipos else "ninguno"))
+
+    if docs["subida"]:
+        accion, subidos, ya_existian, errs = docs["subida"]
+        verbo = {"subido": "Docs SUBIDOS",
+                 "subido_con_periodo": "Docs SUBIDOS (hubo que completar Período)",
+                 "sin_items_nuevos": "Docs: nada nuevo que subir",
+                 "rechazado": "Docs subir RECHAZADO por el sitio",
+                 "simulado": "Docs (simulado)",
+                 "sin_items": "Docs subir: sin items"}.get(accion, accion)
+        nota = f"{verbo} ({len(subidos)}): " + (", ".join(subidos) or "ninguno")
+        if ya_existian:
+            nota += f" | ya tenía, no se re-subió ({len(ya_existian)}): " + ", ".join(ya_existian)
+        if omitidos:
+            nota += f" | omitidos: {'; '.join(omitidos)}"
+        if errs:
+            nota += f" | errores: {'; '.join(errs)}"
+
+        # Si falta alguno de los documentos habituales no se frena nada, solo
+        # queda la advertencia en el reporte. Lo que la persona ya tenía
+        # cargado cuenta como presente aunque no venga en la carpeta de ahora.
+        presentes_norm = {normalizar_texto(t) for t in (subidos + ya_existian)}
+        faltantes = [t for t in DOCUMENTOS_SET_ESTANDAR
+                     if normalizar_texto(t) not in presentes_norm]
+        if faltantes:
+            nota += (f" | ⚠ FALTAN documentos del set estándar ({len(faltantes)}): "
+                     + ", ".join(faltantes))
+            faltan = True
+        notas.append(nota)
+
+    return notas, faltan
 
 
 # Agrega al reporte la aclaración de qué datos se completaron solos.
@@ -577,112 +626,65 @@ def main(argv=None):
             resultados.append(resultado)
             print(f"   -> {resultado.estado}: {resultado.detalle}")
 
-            # Borrar los documentos viejos: solo si se pidió, solo a quien ya
-            # existía y solo si no hubo problemas al procesarla.
-            if (LIMPIAR_DOCUMENTOS and resultado.preexistente
-                    and resultado.estado != "ERROR"):
+            # Cada cosa de documentos tiene su propia condición para correr:
+            # borrar los viejos es solo para quien ya existía; anotar lo que
+            # tiene, para cualquiera que no haya fallado; subir, para quien
+            # haya quedado bien en el sistema (los estados simulados entran
+            # también, si no en modo prueba esta parte nunca se probaría).
+            quiere_limpiar = bool(LIMPIAR_DOCUMENTOS and resultado.preexistente
+                                  and resultado.estado != "ERROR")
+            quiere_verificar = bool(VERIFICAR_DOCUMENTOS and resultado.estado != "ERROR")
+            quiere_subir = bool(SUBIR_DOCUMENTOS and resultado.estado in (
+                "CREADO", "EDITADO", "SIN_CAMBIOS", "SIMULADO_CREAR", "SIMULADO_EDITAR"))
+
+            # La carpeta se revisa antes de ir a ninguna parte: si no está o no
+            # tiene nada que sirva, no hay nada que subir y quizás ni haga
+            # falta entrar a la pantalla de documentos.
+            items, omitidos = None, []
+            if quiere_subir:
+                carpeta, motivo = _buscar_carpeta_persona(
+                    SUBIR_DOCUMENTOS, fila["NOMBRES"],
+                    fila["apellidoPaterno"], fila["apellidoMaterno"])
+                nota_carpeta = ""
+                if not carpeta:
+                    nota_carpeta = f"⚠ FALTAN TODOS los documentos: {motivo}"
+                else:
+                    items, omitidos = preparar_items_carpeta(carpeta)
+                    if not items:
+                        nota_carpeta = (
+                            "⚠ FALTAN TODOS los documentos: la carpeta no tiene archivos válidos"
+                            + (f" | omitidos: {omitidos}" if omitidos else ""))
+                if nota_carpeta:
+                    quiere_subir = False
+                    docs_incompletos += 1
+                    resultado.detalle = (resultado.detalle + " | " + nota_carpeta).strip(" |")
+                    print(f"   -> {nota_carpeta}")
+
+            # Todo lo que quede por hacer se resuelve en UNA sola visita a la
+            # pantalla de documentos: llegar hasta ahí es lo más lento del bot.
+            if quiere_limpiar or quiere_verificar or quiere_subir:
                 try:
-                    accion, docs = limpiar_documentos_trabajador(
+                    docs = gestionar_documentos_trabajador(
                         page, rut, proveedor,
-                        borrar=(LIMPIAR_DOCUMENTOS == "borrar"),
+                        limpiar=(LIMPIAR_DOCUMENTOS if quiere_limpiar else None),
+                        verificar=quiere_verificar,
+                        items=(items if quiere_subir else None),
+                        periodo_ddmmaaaa=formatear_fecha(fila["fechaContratacion"]),
+                        vencimiento_ddmmaaaa=formatear_fecha(fila["fechaTermino"]),
+                        guardar=(not NO_GUARDAR),
                     )
-                    if accion == "sin_rut":
-                        nota = "Docs: no se pudo abrir la vista (RUT no está en la grilla)"
-                    elif accion == "listado":
-                        nota = (f"Docs borrables ({len(docs)}): "
-                                + (" ; ".join(docs) if docs else "ninguno"))
-                    else:
-                        nota = (f"Docs BORRADOS ({len(docs)}): "
-                                + (" ; ".join(docs) if docs else "ninguno"))
-                    resultado.detalle = (resultado.detalle + " | " + nota).strip(" |")
-                    print(f"   -> {nota}")
-                except Exception as e:
-                    resultado.detalle += f" | Docs: ERROR en limpieza: {e}"
-                    print(f"   -> Docs: ERROR en limpieza: {e}")
-                finally:
-                    # Esto deja la página en la lista base, así que el grupo
-                    # hay que volver a elegirlo en la persona siguiente.
-                    grupo_actual = None
-
-            # Repasar qué documentos tiene ya cada persona, sin tocar nada.
-            if VERIFICAR_DOCUMENTOS and resultado.estado != "ERROR":
-                try:
-                    accion_v, tipos_v = tipos_documentos_existentes(page, rut, proveedor)
-                    if accion_v == "sin_rut":
-                        nota_v = "Docs actuales: no se pudo abrir la vista (RUT no está en la grilla)"
-                    else:
-                        nota_v = (f"Docs actuales ({len(tipos_v)}): "
-                                  + (", ".join(tipos_v) if tipos_v else "ninguno"))
-                    resultado.detalle = (resultado.detalle + " | " + nota_v).strip(" |")
-                    print(f"   -> {nota_v}")
-                except Exception as e:
-                    resultado.detalle += f" | Docs verificar: ERROR: {e}"
-                    print(f"   -> Docs verificar: ERROR: {e}")
-                finally:
-                    grupo_actual = None
-
-            # Subir los documentos nuevos, si se pidió y la persona quedó bien
-            # en el sistema. Los estados simulados también entran acá: son los
-            # de la corrida de prueba, y si no, en modo prueba nunca se
-            # alcanzaba a probar esta parte.
-            if (SUBIR_DOCUMENTOS
-                    and resultado.estado in (
-                        "CREADO", "EDITADO", "SIN_CAMBIOS",
-                        "SIMULADO_CREAR", "SIMULADO_EDITAR",
-                    )):
-                try:
-                    carpeta, motivo = _buscar_carpeta_persona(
-                        SUBIR_DOCUMENTOS, fila["NOMBRES"],
-                        fila["apellidoPaterno"], fila["apellidoMaterno"])
-                    if not carpeta:
-                        nota = f"⚠ FALTAN TODOS los documentos: {motivo}"
+                    notas, faltan = _notas_documentos(docs, omitidos)
+                    if faltan:
                         docs_incompletos += 1
-                    else:
-                        items, omitidos = preparar_items_carpeta(carpeta)
-                        if not items:
-                            nota = ("⚠ FALTAN TODOS los documentos: la carpeta no tiene archivos válidos"
-                                    + (f" | omitidos: {omitidos}" if omitidos else ""))
-                            docs_incompletos += 1
-                        else:
-                            periodo = formatear_fecha(fila["fechaContratacion"])
-                            vencimiento = formatear_fecha(fila["fechaTermino"])
-                            accion, subidos, ya_existian, errs = subir_documentos_trabajador(
-                                page, rut, proveedor, items, periodo,
-                                vencimiento_ddmmaaaa=vencimiento,
-                                guardar=(not NO_GUARDAR))
-                            verbo = {"subido": "Docs SUBIDOS",
-                                     "subido_con_periodo": "Docs SUBIDOS (hubo que completar Período)",
-                                     "sin_items_nuevos": "Docs: nada nuevo que subir",
-                                     "rechazado": "Docs subir RECHAZADO por el sitio",
-                                     "simulado": "Docs (simulado)",
-                                     "sin_rut": "Docs subir: RUT no está en la grilla",
-                                     "sin_items": "Docs subir: sin items"}.get(accion, accion)
-                            nota = f"{verbo} ({len(subidos)}): " + (", ".join(subidos) or "ninguno")
-                            if ya_existian:
-                                nota += f" | ya tenía, no se re-subió ({len(ya_existian)}): " + ", ".join(ya_existian)
-                            if omitidos:
-                                nota += f" | omitidos: {'; '.join(omitidos)}"
-                            if errs:
-                                nota += f" | errores: {'; '.join(errs)}"
-
-                            # Si falta alguno de los documentos habituales no
-                            # se frena nada, solo queda la advertencia en el
-                            # reporte. Lo que la persona ya tenía cargado
-                            # cuenta como presente aunque no venga en la
-                            # carpeta de esta vez.
-                            presentes_norm = {normalizar_texto(t) for t in (subidos + ya_existian)}
-                            faltantes = [t for t in DOCUMENTOS_SET_ESTANDAR
-                                         if normalizar_texto(t) not in presentes_norm]
-                            if faltantes:
-                                nota += (f" | ⚠ FALTAN documentos del set estándar ({len(faltantes)}): "
-                                         + ", ".join(faltantes))
-                                docs_incompletos += 1
-                    resultado.detalle = (resultado.detalle + " | " + nota).strip(" |")
-                    print(f"   -> {nota}")
+                    for nota in notas:
+                        resultado.detalle = (resultado.detalle + " | " + nota).strip(" |")
+                        print(f"   -> {nota}")
                 except Exception as e:
-                    resultado.detalle += f" | Docs subir: ERROR: {e}"
-                    print(f"   -> Docs subir: ERROR: {e}")
+                    resultado.detalle += f" | Docs: ERROR: {e}"
+                    print(f"   -> Docs: ERROR: {e}")
                 finally:
+                    # Se volvió a la lista base, así que el grupo hay que
+                    # elegirlo de nuevo en la persona siguiente.
                     grupo_actual = None
 
             if resultado.estado in ("CREADO", "EDITADO"):
