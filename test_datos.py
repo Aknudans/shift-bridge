@@ -101,6 +101,10 @@ def test_tipo_desde_nombre_archivo():
         "CONTACTO EN CASO DE EMERGENCIA.pdf": "Contacto en caso de Emergencia",
         # Nombre igual al tipo del catálogo: tiene que calzar por la vía directa.
         "Contrato de Trabajo.pdf": "Contrato de Trabajo",
+        # Así llegan en la práctica: sin el "de".
+        "Contrato Trabajo.pdf": "Contrato de Trabajo",
+        "CONTRATO_TRABAJO ADAN LEON.pdf": "Contrato de Trabajo",
+        "Anexo contrato trabajo.pdf": "Anexos de Contrato",
         "Finiquito de Trabajo.docx": "Finiquito de Trabajo",
     }
     for archivo, esperado in casos.items():

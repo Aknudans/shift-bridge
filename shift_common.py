@@ -105,7 +105,7 @@ def conectar_a_chrome_existente():
         browser = playwright.chromium.connect_over_cdp(CDP_URL)
     except Exception as e:
         print("ERROR: No se pudo conectar a Chrome en el puerto 9222.")
-        print("¿Abriste Chrome con --remote-debugging-port=9222 y dejaste esa ventana abierta?")
+        print("Verificar que Chrome esté abierto con --remote-debugging-port=9222 y que esa ventana siga abierta.")
         print(f"Detalle técnico: {e}")
         sys.exit(1)
 

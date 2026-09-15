@@ -3,11 +3,14 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================================
-echo   Construir ShiftLaboralBot.exe
+echo   Construir ShiftLaboralBot
 echo ============================================================
 echo.
-echo Esto arma el ejecutable en dist\ShiftLaboralBot.exe. Puede tardar
-echo unos minutos (empaqueta el driver de Playwright, ~100 MB).
+echo Esto arma el programa en la carpeta dist\ShiftLaboralBot\ (el .exe
+echo con sus archivos al lado). Puede tardar unos minutos (empaqueta el
+echo driver de Playwright, ~100 MB).
+echo.
+echo IMPORTANTE: cerrar el programa si esta abierto antes de construir.
 echo.
 
 python -m pip show pyinstaller >nul 2>&1
@@ -16,12 +19,16 @@ if errorlevel 1 (
     python -m pip install pyinstaller
 )
 
-python -m PyInstaller ShiftLaboralBot.spec --distpath dist --workpath build
+python -m PyInstaller ShiftLaboralBot.spec --distpath dist --workpath build --noconfirm
 
 echo.
-if exist "dist\ShiftLaboralBot.exe" (
+if exist "dist\ShiftLaboralBot\ShiftLaboralBot.exe" (
     echo ============================================================
-    echo   Listo: dist\ShiftLaboralBot.exe
+    echo   Listo: dist\ShiftLaboralBot\ShiftLaboralBot.exe
+    echo.
+    echo   Para entregarlo, copiar la CARPETA completa dist\ShiftLaboralBot\
+    echo   ^(o comprimirla en .zip^). El .exe solo, sin su carpeta
+    echo   _internal al lado, NO funciona.
     echo ============================================================
 ) else (
     echo ============================================================

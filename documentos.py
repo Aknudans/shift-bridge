@@ -341,13 +341,17 @@ _MAPEO_NOMBRE_TIPO = [
     (_re.compile(r"ENTREGA .*EPP|EPP .*ENTREGA"),   "Registro Entrega EPP"),
     (_re.compile(r"USO EPP"),                       "Registro de Capacitación Uso EPP"),
     (_re.compile(r"^C\s*I\b|CEDULA|CARNET"),        "Cédula de Identidad"),
+    # Los anexos van antes que los contratos: "Anexo contrato trabajo" es un
+    # anexo, no el contrato.
+    (_re.compile(r"ANEXO.*PERSONAL EST"),           "Anexos de contrato personal EST"),
+    (_re.compile(r"ANEXOS? (DE )?CONTRATO"),        "Anexos de Contrato"),
     (_re.compile(r"^CD\b|CONTRATO PUESTA A DISPOSICION|CONTRATO DE DISPOSICION|\bCPD\b"),
      "Contrato puesta a disposición"),
-    (_re.compile(r"CONTRATO DE TRABAJO"),           "Contrato de Trabajo"),
+    # Los archivos llegan como "Contrato Trabajo" a secas, sin el "de". En el
+    # sitio se elige "LOGISTICA FALABELLA/Contrato de Trabajo".
+    (_re.compile(r"CONTRATO (DE )?TRABAJO"),        "Contrato de Trabajo"),
     (_re.compile(r"FINIQUITO"),                     "Finiquito de Trabajo"),
     (_re.compile(r"\bVISA\b|\bATT\b"),              "Visa de trabajo o ATT"),
-    (_re.compile(r"ANEXO.*PERSONAL EST"),           "Anexos de contrato personal EST"),
-    (_re.compile(r"ANEXO DE CONTRATO|ANEXOS DE CONTRATO"), "Anexos de Contrato"),
     (_re.compile(r"COMPROBANTE.*ENTREVISTA"),       "Comprobante de Entrevista del personal EST y OUT"),
     (_re.compile(r"LIQUIDACION"),                   "Liquidaciones de Sueldo"),
 ]

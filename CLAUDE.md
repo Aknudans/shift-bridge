@@ -23,7 +23,8 @@ python -m playwright install chromium
 ```
 
 **Ejecutar el bot** (opción recomendada para el usuario final, sin Python
-instalado): `dist/ShiftLaboralBot.exe` (ver sección 12.15 — construirlo con
+instalado): `dist/ShiftLaboralBot/ShiftLaboralBot.exe`, entregando la carpeta
+completa (ver secciones 12.15 y 12.18 — construirlo con
 `construir_exe.bat`). Mismo botón de "Abrir Chrome", mismos 3 modos, log en
 vivo y barra de progreso, sin ninguna ventana de consola detrás.
 
@@ -607,7 +608,8 @@ app_entry.py            — punto de entrada único del .exe empaquetado (ver
                           con Python, solo lo necesita interfaz.py cuando NO
                           está empaquetado (en el .exe, se relanza a sí mismo).
 ShiftLaboralBot.spec    — receta de PyInstaller para armar el .exe. Ver 12.15.
-construir_exe.bat       — corre PyInstaller y arma dist/ShiftLaboralBot.exe.
+construir_exe.bat       — corre PyInstaller y arma la carpeta
+                          dist/ShiftLaboralBot/ (ver 12.18).
 requirements.txt       — dependencias Python (incluye customtkinter, pyinstaller)
 README.md              — instrucciones de uso para el usuario final (no técnico)
 CLAUDE.md              — este archivo
@@ -1341,7 +1343,8 @@ que no aparezca ninguna ventana de consola detrás de la app.
   (`console=False`).
 - **`construir_exe.bat`**: instala PyInstaller si falta y corre
   `pyinstaller ShiftLaboralBot.spec`. Resultado: `dist/ShiftLaboralBot.exe`
-  (~97 MB, la mayor parte es el driver de Playwright).
+  (~97 MB, la mayor parte es el driver de Playwright). **Reemplazado el
+  14/09/2026 por la versión en carpeta, ver 12.18.**
 - ✅ **Validado en vivo (08/09/2026)**: `dist/ShiftLaboralBot.exe
   --modo-comparar --input SHIFT.xlsx --output ...` llegó exactamente al mismo
   punto que en modo desarrollo (cargó el Excel, intentó conectar a Chrome en
@@ -1358,6 +1361,43 @@ que no aparezca ninguna ventana de consola detrás de la app.
   tiene sentido versionarlo); `ShiftLaboralBot.spec` SÍ se versiona.
   `requirements.txt` agrega `pyinstaller>=6.0` con nota de que solo hace
   falta para construir el `.exe`, no para correr los scripts con Python.
+
+### 12.18 Arranque lento del .exe — pasado a carpeta (14/09/2026)
+
+🔴 **Problema**: el `.exe` de un solo archivo (`--onefile`) tardaba **~18,5 s**
+en mostrar la ventana y **~21,7 s** en arrancar el bot al presionar
+"Iniciar". Causas medidas:
+- Un `--onefile` descomprime TODO su contenido en `%TEMP%\_MEIxxxx` en cada
+  apertura (y lo borra al cerrar). Eran **7.404 archivos**, incluido el driver
+  de Playwright (~101 MB), aunque la interfaz no lo usa.
+- La interfaz se relanza a sí misma para correr el bot (12.15), así que la
+  extracción completa se pagaba **dos veces**.
+- PyInstaller arrastró paquetes instalados en el Python global que el bot no
+  usa: **jedi (~5.500 archivos)**, IPython, ipykernel, zmq, PIL, pygments,
+  setuptools, etc. (pandas los menciona como opcionales).
+
+**Fix en `ShiftLaboralBot.spec`**:
+1. Formato **carpeta** (`exclude_binaries=True` + `COLLECT`): resultado
+   `dist/ShiftLaboralBot/ShiftLaboralBot.exe` + `_internal/`. No se
+   descomprime nada al abrir. **Se entrega la carpeta completa** (o un
+   `.zip`); el `.exe` solo no funciona sin `_internal/`.
+2. Lista `EXCLUIDOS` con esos paquetes. PIL es opcional en customtkinter (solo
+   `CTkImage`, que la interfaz no usa). Si en el futuro se usa algo de esa
+   lista (ej. `CTkImage` o `pandas.read_html`), sacarlo de `EXCLUIDOS`.
+3. `upx=False` (UPX no estaba instalado; el flag no hacía nada).
+
+**Resultado medido (promedio de 3, mismo equipo)**:
+| | antes (onefile) | después (carpeta) |
+|---|---|---|
+| Ventana visible | 18,5 s | **0,85 s** (1,5 s la primera vez, luego ~0,5 s) |
+| Modo bot hasta terminar de importar (`--modo-crear --help`) | 21,7 s | **1,7 s** (3,1 s la primera, luego ~1,0 s) |
+| Archivos | 7.404 (extraídos en cada apertura) | 1.792 (180 MB en disco) |
+
+✅ Validado: `--modo-comparar --input SHIFT.xlsx` desde la carpeta cargó el
+Excel y el driver de Playwright arrancó (llegó a `ECONNREFUSED 127.0.0.1:9222`
+por no haber Chrome abierto, igual que en 12.15). `test_datos.py` 11/11.
+**Falta**: un modo real con sesión de ShiftLaboral iniciada (mismo pendiente
+de 12.15).
 
 ## 13. PENDIENTES — retomar próxima sesión (actualizado 08/09/2026)
 
