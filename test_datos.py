@@ -14,9 +14,17 @@ import tempfile
 
 import pandas as pd
 
-from shift_common import normalizar_sexo, normalizar_texto, quitar_prefijo_catalogo
+from shift_common import (
+    formatear_nombre_propio,
+    normalizar_sexo,
+    normalizar_texto,
+    quitar_prefijo_catalogo,
+)
 from crear_o_editar import (
     _buscar_carpeta_persona,
+    _carpeta_sugerida,
+    chequear_carpeta_documentos,
+    chequear_datos_excel,
     asignar_carpetas_lote,
     _vacio,
     autocompletar_campos_negocio,
@@ -42,6 +50,88 @@ def test_quitar_prefijo_catalogo():
     assert quitar_prefijo_catalogo("LOF1 ACCESO1") == "LOF1 ACCESO1"
     assert quitar_prefijo_catalogo(None) == ""
     assert normalizar_texto("  provida ") == "PROVIDA"
+
+
+# Tildes y mayúsculas no deben hacer creer que es otra persona: fue la causa
+# de los falsos "identidad DISTINTA" (HENRIQUEZ vs Henríquez).
+def test_normalizar_texto_ignora_tildes_y_mayusculas():
+    assert normalizar_texto("Henríquez") == normalizar_texto("HENRIQUEZ")
+    assert normalizar_texto("Valentina Noemí") == normalizar_texto("VALENTINA NOEMI")
+    assert normalizar_texto("MARIA ISABEL  Paredes") == "MARIA ISABEL PAREDES"
+    assert normalizar_texto("Muñoz") == normalizar_texto("MUNOZ")
+    assert normalizar_texto("Banmédica") == "BANMEDICA"
+
+
+# Así se escriben en el sitio nombres y apellidos: sin tildes y con mayúscula
+# inicial en cada palabra. La ñ se conserva.
+def test_formatear_nombre_propio():
+    assert formatear_nombre_propio("VALDÉS") == "Valdes"
+    assert formatear_nombre_propio("débora abigail") == "Debora Abigail"
+    assert formatear_nombre_propio("MARIA ISABEL  ") == "Maria Isabel"
+    assert formatear_nombre_propio("San martin") == "San Martin"
+    assert formatear_nombre_propio("MUÑOZ") == "Muñoz"
+    assert formatear_nombre_propio("saint-felix") == "Saint-Felix"
+    assert formatear_nombre_propio(None) == ""
+    assert formatear_nombre_propio("nan") == ""
+    assert formatear_nombre_propio(float("nan")) == ""
+
+
+# El chequeo previo detecta en el Excel lo que después termina en un timeout
+# del sitio: celdas obligatorias vacías y AFP/Salud fuera del catálogo.
+def test_chequear_datos_excel():
+    base = dict(RUT="1-9", NOMBRES="Ana", apellidoPaterno="Rojas", SEXO="Femenino",
+                AFP="Provida", ISAPRE="Fonasa", CARGO="X", PROVEEDOR="Y", TIENDA="Z",
+                fechaContratacion="2026-09-01")
+    df = pd.DataFrame([
+        base,
+        dict(base, RUT="2-7", AFP="Sin AFP"),
+        dict(base, RUT="3-5", AFP=float("nan"), ISAPRE="banmedica"),
+        dict(base, RUT="4-3", SEXO=""),
+    ])
+    hallazgos = {rut: probs for rut, _, probs in chequear_datos_excel(df)}
+    assert "1-9" not in hallazgos
+    assert any("Sin AFP" in p for p in hallazgos["2-7"])
+    # "banmedica" sin tilde es válido; la AFP vacía no.
+    assert hallazgos["3-5"] == ["'AFP' vacío"]
+    assert hallazgos["4-3"] == ["'Sexo' vacío"]
+
+
+def test_carpeta_sugerida():
+    assert _carpeta_sugerida("Débora Abigail", "San Martín") == "Debora_San_Martin"
+    assert _carpeta_sugerida("Ayleen Yordana", "Palma") == "Ayleen_Palma"
+
+
+# Cruce planilla/carpeta: quién no tiene carpeta, qué archivos no se
+# reconocen y qué quedó escondido en subcarpetas.
+def test_chequear_carpeta_documentos():
+    base = tempfile.mkdtemp()
+    try:
+        carpeta = os.path.join(base, "Ana_Rojas")
+        os.makedirs(os.path.join(carpeta, "_pdf"))
+        for nombre in ("CI Ana.pdf", "Riohs.pdf", "EPP.pdf", "foto.heic",
+                       os.path.join("_pdf", "cedula.pdf")):
+            open(os.path.join(carpeta, nombre), "w").close()
+        os.makedirs(os.path.join(base, "Pedro_Extra"))
+
+        df = pd.DataFrame([
+            dict(RUT="1-9", NOMBRES="Ana", apellidoPaterno="Rojas", apellidoMaterno="Vera"),
+            dict(RUT="2-7", NOMBRES="Karen", apellidoPaterno="Bravo", apellidoMaterno="Diaz"),
+        ])
+        por_persona, sin_dueno, asignacion = chequear_carpeta_documentos(df, base)
+        ana, karen = por_persona
+
+        assert ana["carpeta"] == "Ana_Rojas"
+        assert [t for _, t in ana["reconocidos"]] == [
+            "Cédula de Identidad", "TC Reglamento Interno RIOHS mandante"]
+        assert len(ana["omitidos"]) == 2  # EPP.pdf y foto.heic
+        assert ana["en_subcarpetas"] == [os.path.join("_pdf", "cedula.pdf")]
+        assert "Registro Entrega EPP" in ana["faltan"]
+
+        assert karen["carpeta"] is None and karen["sugerida"] == "Karen_Bravo"
+        assert sin_dueno == ["Pedro_Extra"]
+        assert asignacion[0][0] == carpeta
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_formatear_fecha():

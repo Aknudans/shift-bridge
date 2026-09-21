@@ -3,7 +3,20 @@ from typing import Optional
 
 from playwright.sync_api import Page
 
-from shift_common import normalizar_texto
+from shift_common import es_vacio, normalizar_texto
+
+# Se lanza cuando un combo (Sexo, AFP, Sistema de Salud) no se pudo llenar.
+# El mensaje dice qué campo era y qué valor se intentó poner, para que el
+# reporte lo muestre tal cual en vez de un timeout de Playwright.
+class CampoNoCompletado(Exception):
+    pass
+
+
+# Comparación en el navegador equivalente a normalizar_texto: sin tildes,
+# sin mayúsculas y sin espacios de más.
+_JS_NORM = r"""(s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                           .replace(/\s+/g, ' ').trim().toUpperCase()"""
+
 
 # El Cancelar del formulario, igual en ver, editar y crear.
 SELECTOR_BTN_CANCELAR = "#btnCancelar"
@@ -216,13 +229,58 @@ def leer_combobox_simple(page: Page, fragmento: str) -> str:
         return ""
 
 
-# Abre la lista y elige la opción que diga exactamente lo que se le pide.
-def escribir_combobox_simple(page: Page, fragmento: str, valor_deseado: str):
-    input_visible = page.locator(f'[id*="{fragmento}"][id$="_I"]')
-    input_visible.click(timeout=5000)
+# Abre la lista y elige la opción que coincida con lo pedido, sin importar
+# tildes ni mayúsculas ("banmedica" elige "Banmédica"). Solo se miran las
+# opciones visibles de ese combo: antes se buscaba cualquier texto de la
+# página y una celda vacía ("nan") calzaba con un aviso oculto del sitio.
+# Si el valor viene vacío o no está en la lista, lanza CampoNoCompletado.
+def escribir_combobox_simple(page: Page, fragmento: str, valor_deseado: str,
+                             etiqueta: Optional[str] = None):
+    nombre_campo = etiqueta or fragmento
+    if es_vacio(valor_deseado):
+        raise CampoNoCompletado(
+            f"campo '{nombre_campo}' vacío en el Excel; completarlo con un valor del catálogo."
+        )
+    valor = str(valor_deseado).strip()
+
+    try:
+        page.locator(f'[id*="{fragmento}"][id$="_I"]').click(timeout=5000)
+    except Exception as e:
+        raise CampoNoCompletado(
+            f"no se pudo abrir el campo '{nombre_campo}' para poner '{valor}': {e}"
+        )
     time.sleep(0.3)
-    opcion = page.locator(f"text={valor_deseado}").first
-    opcion.click(timeout=5000)
+
+    info = page.evaluate(
+        """([fragmento, deseado]) => {
+            const norm = """ + _JS_NORM + """;
+            document.querySelectorAll('[data-bot-opcion]')
+                .forEach(e => e.removeAttribute('data-bot-opcion'));
+            const visibles = Array.from(document.querySelectorAll('.dxeListBoxItem'))
+                .filter(e => e.offsetParent !== null && e.textContent.trim() !== '');
+            const delCombo = visibles.filter(e => (e.id || '').includes(fragmento));
+            const items = delCombo.length ? delCombo : visibles;
+            const objetivo = items.find(e => norm(e.textContent) === norm(deseado));
+            if (objetivo) objetivo.setAttribute('data-bot-opcion', '1');
+            return { ok: !!objetivo, opciones: items.map(e => e.textContent.trim()) };
+        }""",
+        [fragmento, valor],
+    )
+
+    if not info["ok"]:
+        page.keyboard.press("Escape")
+        disponibles = ", ".join(info["opciones"]) or "no se pudieron leer"
+        raise CampoNoCompletado(
+            f"campo '{nombre_campo}': el valor '{valor}' no existe en la lista del sitio "
+            f"(opciones: {disponibles})."
+        )
+
+    try:
+        page.locator('[data-bot-opcion="1"]').first.click(timeout=5000)
+    except Exception as e:
+        raise CampoNoCompletado(
+            f"campo '{nombre_campo}': no se pudo seleccionar '{valor}': {e}"
+        )
     time.sleep(0.3)
 
 
@@ -310,7 +368,7 @@ def establecer_multiselect_valor_unico(page: Page, etiqueta: str, valor_deseado:
 
     resultado = page.evaluate(
         """(valorDeseado) => {
-            const norm = (s) => (s || '').trim().toUpperCase();
+            const norm = """ + _JS_NORM + """;
             const items = Array.from(document.querySelectorAll('.dxeListBoxItem'))
                 .filter(e => e.offsetParent !== null);
             const pares = [];

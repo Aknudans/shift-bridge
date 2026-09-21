@@ -1,5 +1,6 @@
 import sys
 import time
+import unicodedata
 from typing import Optional
 
 from openpyxl import Workbook
@@ -34,13 +35,50 @@ SELECTOR_MENU_TRABAJADORES = "#mf_cab_ll_01_01"
 PREFIJO_CATALOGO = "LOGISTICA FALABELLA/"
 
 
+# Una celda del Excel sin llenar: pandas la entrega como NaN, que al pasarla
+# a texto queda "nan".
+def es_vacio(valor) -> bool:
+    if valor is None:
+        return True
+    if isinstance(valor, float) and pd.isna(valor):
+        return True
+    return str(valor).strip().lower() in ("", "nan", "nat", "none")
+
+
+# Saca tildes, diéresis y demás marcas (Á -> A, ü -> u). Con conservar_enie
+# la ñ se deja tal cual, porque es una letra y no un acento.
+def quitar_tildes(texto: str, conservar_enie: bool = False) -> str:
+    salida = []
+    for ch in unicodedata.normalize("NFD", texto):
+        if unicodedata.category(ch) == "Mn":
+            if conservar_enie and ch == "̃" and salida and salida[-1] in "nN":
+                salida.append(ch)
+            continue
+        salida.append(ch)
+    return unicodedata.normalize("NFC", "".join(salida))
+
+
 # Comparar texto del Excel contra texto del sitio sin que estorben las
-# mayúsculas, los espacios de más ni el prefijo del catálogo.
+# mayúsculas, las tildes (también la de la ñ), los espacios de más ni el
+# prefijo del catálogo: "Henríquez" y "HENRIQUEZ" cuentan como iguales.
 
 def normalizar_texto(valor: Optional[str]) -> str:
     if valor is None:
         return ""
-    return str(valor).strip().upper()
+    return " ".join(quitar_tildes(str(valor)).split()).upper()
+
+
+# Deja un nombre o apellido listo para escribirlo en el sitio: sin tildes,
+# sin espacios de más y con mayúscula inicial en cada palabra
+# ("MARIA ISABEL  paredes" -> "Maria Isabel Paredes"). La ñ se conserva.
+def formatear_nombre_propio(valor: Optional[str]) -> str:
+    if es_vacio(valor):
+        return ""
+    palabras = quitar_tildes(str(valor), conservar_enie=True).split()
+    return " ".join(
+        "-".join(parte.capitalize() for parte in palabra.split("-"))
+        for palabra in palabras
+    )
 
 
 def quitar_prefijo_catalogo(valor: Optional[str]) -> str:
@@ -63,6 +101,9 @@ RENOMBRE_COLUMNAS_ENTRADA = {
     "afp": "AFP",
     "isapre": "ISAPRE",
 }
+
+
+COLUMNAS_NOMBRE_PROPIO = ("NOMBRES", "apellidoPaterno", "apellidoMaterno")
 
 
 # La planilla escribe el sexo como M o F y el sitio espera la palabra completa.
@@ -88,6 +129,12 @@ def cargar_excel(path: str, columnas_requeridas: list[str]) -> pd.DataFrame:
 
     if "SEXO" in df.columns:
         df["SEXO"] = df["SEXO"].map(normalizar_sexo)
+
+    # Nombres y apellidos se ingresan siempre con el mismo formato, sin
+    # importar cómo vengan escritos en la planilla.
+    for col in COLUMNAS_NOMBRE_PROPIO:
+        if col in df.columns:
+            df[col] = df[col].map(formatear_nombre_propio)
 
     faltantes = [c for c in columnas_requeridas if c not in df.columns]
     if faltantes:

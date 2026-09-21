@@ -94,6 +94,11 @@ AYUDA = [
         "«Adan_Leon»), y dentro de cada una sus archivos.",
         "El nombre del archivo es lo que decide qué tipo de documento es. Se "
         "reconocen las abreviaturas habituales, así que no hace falta renombrarlos.",
+        "Antes de iniciar conviene apretar «Revisar antes de iniciar»: sin abrir el "
+        "sitio, muestra quién no tiene carpeta (con el nombre que debería tener), "
+        "qué carpetas no calzan con nadie, qué archivos no se reconocen, cuáles "
+        "están en subcarpetas (esos no se leen) y qué celdas obligatorias del Excel "
+        "vienen vacías o con una AFP o Sistema de Salud que no existe.",
         "Si un archivo no se reconoce, se omite ese archivo solo y queda avisado en "
         "el reporte; los demás se suben igual. Lo mismo si a alguien le falta algún "
         "documento del set habitual: no frena nada, solo queda la advertencia.",
@@ -291,6 +296,13 @@ class InterfazBot(ctk.CTk):
             command=self._iniciar, height=40,
         )
         self.boton_iniciar.pack(side="left", padx=10, pady=10)
+
+        # Revisa el Excel y la carpeta sin abrir el sitio. No hace falta tener
+        # Chrome abierto ni sesión iniciada.
+        self.boton_revisar = ctk.CTkButton(
+            marco_accion, text="Revisar antes de iniciar", command=self._revisar, height=40,
+        )
+        self.boton_revisar.pack(side="left", padx=10, pady=10)
 
         # Botón de emergencia: corta todo al instante. Solo se puede apretar
         # mientras hay algo corriendo.
@@ -520,6 +532,22 @@ class InterfazBot(ctk.CTk):
             comando += ["--subir-documentos", carpeta]
         return comando
 
+    # Corre solo el chequeo previo: datos del Excel y, en el modo de
+    # documentos, qué carpeta le toca a cada persona y qué archivos se
+    # reconocen. No se conecta a Chrome ni modifica nada.
+    def _revisar(self):
+        if self.proceso is not None:
+            return
+        error = self._validar_antes_de_iniciar()
+        if error:
+            messagebox.showwarning("Falta información", error)
+            return
+        comando = self._comando_base_modo("--modo-crear") + [
+            "--input", self.entry_excel.get().strip(), "--solo-chequear"]
+        if self.modo.get() == "documentos":
+            comando += ["--subir-documentos", self.entry_carpeta_docs.get().strip()]
+        self._lanzar(comando, texto_boton="Revisando...")
+
     def _iniciar(self):
         if self.proceso is not None:
             return  # ya hay algo corriendo
@@ -544,14 +572,17 @@ class InterfazBot(ctk.CTk):
             if not confirmar:
                 return
 
-        comando = self._armar_comando()
+        self._lanzar(self._armar_comando(), texto_boton="Corriendo...")
+
+    def _lanzar(self, comando: list[str], texto_boton: str):
         self.total_filas = None
         self.cancelado_por_usuario = False
         self.barra_progreso.set(0)
         self.label_progreso.configure(text="")
         self._limpiar_log()
         self._log("Ejecutando: " + " ".join(comando))
-        self.boton_iniciar.configure(state="disabled", text="Corriendo...")
+        self.boton_iniciar.configure(state="disabled", text=texto_boton)
+        self.boton_revisar.configure(state="disabled")
         self.boton_cancelar.configure(state="normal")
 
         hilo = threading.Thread(target=self._correr_proceso, args=(comando,), daemon=True)
@@ -657,6 +688,7 @@ class InterfazBot(ctk.CTk):
     # Deja los botones como estaban y avisa cómo terminó la cosa.
     def _al_terminar(self, codigo: str):
         self.boton_iniciar.configure(state="normal", text="Iniciar")
+        self.boton_revisar.configure(state="normal")
         self.boton_cancelar.configure(state="disabled", text="Cancelar proceso")
         if self.cancelado_por_usuario:
             self._log("\n=== Proceso CANCELADO por el usuario. El reporte final no se generó — "

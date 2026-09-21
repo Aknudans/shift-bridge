@@ -38,7 +38,7 @@ disponibles.
 `--remote-debugging-port=9222` y sesión iniciada — `abrir_chrome.bat`):
 ```
 python buscar_y_comparar.py --input colaboradores.xlsx --output reporte.xlsx
-python crear_o_editar.py --input SHIFT.xlsx [--no-guardar] [--limpiar-documentos [listar|borrar]] [--verificar-documentos] [--subir-documentos CARPETA]
+python crear_o_editar.py --input SHIFT.xlsx [--no-guardar] [--limpiar-documentos [listar|borrar]] [--verificar-documentos] [--subir-documentos CARPETA] [--solo-chequear]
 ```
 
 **Tests**: `python test_datos.py` (o `python -m pytest test_datos.py`) cubre
@@ -354,8 +354,12 @@ Botones:            #btnCancelar / #btnGuardar
 - Los ids de texto y fechas son iguales en Editar y en Crear. Los combos
   cambian el resto del id (`_ef0_…_0_VI` vs `_efnew_…_VI`): usar siempre
   selección por fragmento.
-- Combos Sexo/AFP/Isapre: `escribir_combobox_simple()` (clic en
-  `[id*="cbXxx"][id$="_I"]` + clic en la opción por texto).
+- Combos Sexo/AFP/Isapre: `escribir_combobox_simple(page, frag, valor, etiqueta)`
+  (clic en `[id*="cbXxx"][id$="_I"]` + clic real en el `.dxeListBoxItem`
+  visible del combo cuyo texto coincide sin tildes ni mayúsculas). Valor vacío
+  o inexistente → `CampoNoCompletado` con el campo y el valor; el reporte lo
+  muestra como "No se pudo completar el formulario: …" (antes, una celda vacía
+  buscaba `text=nan` y calzaba con el aviso oculto `#alerta_jornadas`).
 - Fin Contrato es un datepicker de jQuery UI: `.fill()` funciona.
 - 🔴 **Multi-select ACUMULATIVO** (Proveedores, Cargo, Tiendas): clickear una
   opción suma al valor actual (`"A;B"`). Para dejar un único valor hay que
@@ -415,7 +419,12 @@ LOGISTICA FALABELLA. Al confirmar en "Crear" un RUT ya registrado por otro
 cliente, el sitio **autocompleta Nombres/Apellidos/Sexo y los deja
 `readonly`**. `crear_trabajador_nuevo` espera a que el formulario quede
 editable o bloqueado con valor precargado y, si está bloqueado:
-- Compara Nombres/Apellidos con el Excel (`normalizar_texto`).
+- Compara Nombres/Apellidos con el Excel (`normalizar_texto`: ignora
+  mayúsculas, tildes —incluida la de la ñ— y espacios de más; 21/09/2026,
+  antes "HENRIQUEZ" vs "Henríquez" daba identidad distinta).
+- `cargar_excel` deja NOMBRES y apellidos con `formatear_nombre_propio`
+  (sin tildes, mayúscula inicial por palabra, conserva la ñ): así se escriben
+  en el sitio al crear o editar.
 - **Coinciden** → no toca identidad ni Sexo, llena el resto y guarda; la fila
   queda marcada como `preexistente`.
 - **Difieren** → cierra el formulario y reporta `ERROR` con el detalle. No
@@ -535,6 +544,20 @@ prefijo); si no, recorre `_MAPEO_NOMBRE_TIPO` en orden (gana el primero):
   documento ya cargado que no viene en la carpeta no se reporta como
   faltante. No bloquea el proceso.
 
+### 11.8b Chequeo previo (21/09/2026)
+
+Antes de conectar a Chrome, `crear_o_editar.main()` corre siempre
+`chequear_datos_excel` (celdas obligatorias vacías; AFP / Sistema de Salud
+fuera de `CATALOGO_AFP` / `CATALOGO_SALUD`, comparando sin tildes) y, con
+`--subir-documentos`, `chequear_carpeta_documentos` (reusa
+`asignar_carpetas_lote` y `preparar_items_carpeta`): personas sin carpeta con
+el nombre sugerido (`_carpeta_sugerida`), carpetas sin dueño, archivos no
+reconocidos, archivos en subcarpetas (no se leen), tipos repetidos y faltantes
+del set estándar. Lo imprime `imprimir_chequeo_previo`; no frena la corrida.
+La asignación calculada se reutiliza en el lote. `--solo-chequear` termina
+tras el chequeo sin abrir Chrome; en la interfaz es el botón **"Revisar antes
+de iniciar"**.
+
 ### 11.9 Una sola visita a la vista de documentos por persona
 
 `gestionar_documentos_trabajador(page, rut, grupo, limpiar=, verificar=,
@@ -631,8 +654,8 @@ que se indica aquí.
    reabrir: fue un bug reportado que no se pudo reproducir el 08/09/2026.
 
 ### Prioridad MEDIA
-6. **Reconciliar `SHIFT.xlsx` vs carpetas de documentos** antes de subir
-   (hoy el aviso de faltantes es posterior, no una verificación previa).
+6. ~~Reconciliar `SHIFT.xlsx` vs carpetas antes de subir~~ → hecho con el
+   chequeo previo (11.8b). Falta usarlo en un lote real.
 7. **Completar `_MAPEO_NOMBRE_TIPO`** a medida que aparezcan nombres de
    archivo nuevos; correr `test_datos.py` después de cada cambio.
 8. **Decidir si `--no-guardar` debe forzar la limpieza a `listar`** (hoy no

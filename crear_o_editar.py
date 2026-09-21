@@ -30,6 +30,7 @@ from shift_common import (
     seleccionar_grupo_proveedor,
 )
 from campos_formulario import (
+    CampoNoCompletado,
     cerrar_formulario,
     cerrar_popup_operacion_exitosa,
     confirmar_proveedor_seleccionado,
@@ -130,6 +131,153 @@ def asignar_carpetas_lote(base: str, personas):
         subcarpetas = []
     sin_dueno = [d for d in subcarpetas if os.path.join(base, d) not in duenos]
     return asignacion, sin_dueno
+
+# Catálogos conocidos de AFP y Sistema de Salud (ver CLAUDE.md, sección 7).
+# Solo se usan para avisar en el chequeo previo; el valor que manda es el del
+# sitio, así que un valor fuera de esta lista es una advertencia, no un bloqueo.
+CATALOGO_AFP = ["Provida", "Habitat", "Cuprum", "Capital", "Modelo", "Planvital",
+                "Jubilado", "Uno", "Sin Información"]
+CATALOGO_SALUD = ["Cruz Blanca", "Banmédica", "Consalud", "Ferrosalud", "Vida Tres",
+                  "Fonasa", "Sin Información"]
+
+# Columnas que el sitio necesita sí o sí para crear o editar a alguien.
+COLUMNAS_OBLIGATORIAS_CHEQUEO = [
+    ("SEXO", "Sexo"), ("AFP", "AFP"), ("ISAPRE", "Sistema de Salud"),
+    ("CARGO", "Cargo"), ("PROVEEDOR", "Proveedor"), ("TIENDA", "Tienda"),
+    ("fechaContratacion", "Inicio Contrato"),
+]
+
+
+# Nombre de carpeta que calzaría con la persona: primer nombre + apellido
+# paterno, sin tildes y con "_" entre palabras ("Debora_San_Martin").
+def _carpeta_sugerida(nombre, ap_pat) -> str:
+    primero = "" if _vacio(nombre) else (str(nombre).split() or [""])[0]
+    partes = [primero] + ([] if _vacio(ap_pat) else str(ap_pat).split())
+    return "_".join(_norm_texto(p).capitalize() for p in partes if p)
+
+
+# Revisa el Excel antes de abrir Chrome: celdas obligatorias vacías y AFP o
+# Sistema de Salud que no están en el catálogo conocido. Son las causas de los
+# errores "Timeout ... text=nan" / "text=Sin AFP" de corridas anteriores.
+# Devuelve una lista (rut, nombre, [problemas]) solo con las filas con algo.
+def chequear_datos_excel(df: pd.DataFrame) -> list:
+    afp_ok = {normalizar_texto(v) for v in CATALOGO_AFP}
+    salud_ok = {normalizar_texto(v) for v in CATALOGO_SALUD}
+    hallazgos = []
+    for _, f in df.iterrows():
+        problemas = []
+        for col, etiqueta in COLUMNAS_OBLIGATORIAS_CHEQUEO:
+            if col in f and _vacio(f[col]):
+                problemas.append(f"'{etiqueta}' vacío")
+        if not _vacio(f.get("AFP")) and normalizar_texto(f["AFP"]) not in afp_ok:
+            problemas.append(f"AFP '{f['AFP']}' no está en el catálogo "
+                             f"({', '.join(CATALOGO_AFP)})")
+        if not _vacio(f.get("ISAPRE")) and normalizar_texto(f["ISAPRE"]) not in salud_ok:
+            problemas.append(f"Sistema de Salud '{f['ISAPRE']}' no está en el catálogo "
+                             f"({', '.join(CATALOGO_SALUD)})")
+        if problemas:
+            hallazgos.append((str(f["RUT"]).strip(),
+                              f"{f['NOMBRES']} {f['apellidoPaterno']}", problemas))
+    return hallazgos
+
+
+# Cruza la planilla con la carpeta de documentos sin abrir el sitio: a quién
+# le toca cada subcarpeta, qué archivos se reconocen y cuáles no, qué quedó
+# dentro de subcarpetas (no se leen) y qué falta del set estándar.
+# Devuelve (por_persona, carpetas_sin_dueno, asignacion); `asignacion` es la
+# misma de asignar_carpetas_lote, para reutilizarla en la corrida.
+def chequear_carpeta_documentos(df: pd.DataFrame, base: str):
+    personas = [(f["NOMBRES"], f["apellidoPaterno"], f["apellidoMaterno"])
+                for _, f in df.iterrows()]
+    asignacion, sin_dueno = asignar_carpetas_lote(base, personas)
+
+    por_persona = []
+    for (_, f), (carpeta, motivo) in zip(df.iterrows(), asignacion):
+        info = {
+            "rut": str(f["RUT"]).strip(),
+            "nombre": f"{f['NOMBRES']} {f['apellidoPaterno']}",
+            "carpeta": os.path.basename(carpeta) if carpeta else None,
+            "motivo": motivo,
+            "sugerida": _carpeta_sugerida(f["NOMBRES"], f["apellidoPaterno"]),
+            "reconocidos": [], "omitidos": [], "en_subcarpetas": [],
+            "repetidos": [], "faltan": [],
+        }
+        if carpeta:
+            items, omitidos = preparar_items_carpeta(carpeta)
+            info["reconocidos"] = [(os.path.basename(it["ruta"]), it["tipo"]) for it in items]
+            info["omitidos"] = omitidos
+            for raiz, _dirs, archivos in os.walk(carpeta):
+                if raiz != carpeta:
+                    rel = os.path.relpath(raiz, carpeta)
+                    info["en_subcarpetas"] += [os.path.join(rel, a) for a in archivos]
+            tipos = [it["tipo"] for it in items]
+            info["repetidos"] = sorted({t for t in tipos if tipos.count(t) > 1})
+            info["faltan"] = [t for t in DOCUMENTOS_SET_ESTANDAR if t not in tipos]
+        por_persona.append(info)
+    return por_persona, sin_dueno, asignacion
+
+
+# Muestra el resultado del chequeo previo por consola (la interfaz lo ve en el
+# log). Devuelve cuántas personas tienen algún problema.
+def imprimir_chequeo_previo(datos: list, carpeta: Optional[tuple], base: Optional[str]) -> int:
+    print("=" * 70)
+    print("CHEQUEO PREVIO (no se abre el sitio ni se modifica nada)")
+    print("=" * 70)
+
+    print(f"\n-- Datos del Excel: {len(datos)} fila(s) con problemas --")
+    for rut, nombre, problemas in datos:
+        print(f"  ✗ {rut} {nombre}: " + "; ".join(problemas))
+    if not datos:
+        print("  ✓ Sin problemas en los campos obligatorios.")
+
+    con_problemas = {rut for rut, _, _ in datos}
+    if carpeta is not None:
+        por_persona, sin_dueno, _ = carpeta
+        sin_carpeta = [p for p in por_persona if not p["carpeta"]]
+        con_carpeta = [p for p in por_persona if p["carpeta"]]
+
+        print(f"\n-- Carpeta de documentos: {base} --")
+        print(f"  Personas con carpeta: {len(con_carpeta)} de {len(por_persona)}")
+
+        if sin_carpeta:
+            print(f"\n  ✗ Sin carpeta ({len(sin_carpeta)}):")
+            for p in sin_carpeta:
+                print(f"    - {p['rut']} {p['nombre']}: {p['motivo']}. "
+                      f"Nombre sugerido: '{p['sugerida']}'")
+                con_problemas.add(p["rut"])
+
+        if sin_dueno:
+            print(f"\n  ⚠ Carpetas que no calzan con nadie ({len(sin_dueno)}), revisar "
+                  f"tipeos o palabras de más (RUT, 'docs', '(1)'): {', '.join(sin_dueno)}")
+
+        for p in con_carpeta:
+            avisos = []
+            if p["omitidos"]:
+                avisos.append("no reconocidos: " + "; ".join(p["omitidos"]))
+            if p["en_subcarpetas"]:
+                avisos.append(f"en subcarpetas, NO se leen ({len(p['en_subcarpetas'])}): "
+                              + ", ".join(p["en_subcarpetas"][:5])
+                              + (" …" if len(p["en_subcarpetas"]) > 5 else ""))
+            if p["repetidos"]:
+                avisos.append("tipo repetido (se suben todos): " + ", ".join(p["repetidos"]))
+            if p["faltan"]:
+                avisos.append(f"faltan del set estándar ({len(p['faltan'])}; "
+                              "puede que ya estén cargados en el sitio): "
+                              + ", ".join(p["faltan"]))
+            marca = "⚠" if avisos else "✓"
+            print(f"\n  {marca} {p['rut']} {p['nombre']} -> carpeta '{p['carpeta']}': "
+                  f"{len(p['reconocidos'])} archivo(s) reconocido(s)")
+            for archivo, tipo in p["reconocidos"]:
+                print(f"      · {archivo} -> {tipo}")
+            for a in avisos:
+                print(f"      ⚠ {a}")
+            if p["omitidos"] or p["en_subcarpetas"]:
+                con_problemas.add(p["rut"])
+
+    print(f"\nResumen chequeo: {len(con_problemas)} persona(s) con algo que revisar.")
+    print("=" * 70 + "\n")
+    return len(con_problemas)
+
 
 # Las cajas de texto del formulario. Por suerte se llaman igual al crear que
 # al editar, así que el mismo código sirve para los dos casos.
@@ -331,13 +479,13 @@ def editar_trabajador_existente(page: Page, fila: pd.Series) -> ResultadoFila:
     _tal_vez_actualizar_texto("Sueldo Base", "txtSueldoBase", fila["sueldoBase"])
 
     if normalizar_texto(actuales.get("cbSexo")) != normalizar_texto(fila["SEXO"]):
-        escribir_combobox_simple(page, "cbSexo", fila["SEXO"])
+        escribir_combobox_simple(page, "cbSexo", fila["SEXO"], "Sexo")
         campos_cambiados.append("Sexo")
     if normalizar_texto(actuales.get("cbAFP")) != normalizar_texto(fila["AFP"]):
-        escribir_combobox_simple(page, "cbAFP", fila["AFP"])
+        escribir_combobox_simple(page, "cbAFP", fila["AFP"], "AFP")
         campos_cambiados.append("AFP")
     if normalizar_texto(actuales.get("cbIsapre")) != normalizar_texto(fila["ISAPRE"]):
-        escribir_combobox_simple(page, "cbIsapre", fila["ISAPRE"])
+        escribir_combobox_simple(page, "cbIsapre", fila["ISAPRE"], "Sistema de Salud")
         campos_cambiados.append("Sistema de Salud")
 
     fecha_inicio_excel = formatear_fecha(fila["fechaContratacion"])
@@ -486,11 +634,11 @@ def crear_trabajador_nuevo(page: Page, fila: pd.Series) -> ResultadoFila:
         escribir_campo_texto(page, "txtNombres", str(fila["NOMBRES"]))
         escribir_campo_texto(page, "txtApellidoPaterno", str(fila["apellidoPaterno"]))
         escribir_campo_texto(page, "txtApellidoMaterno", str(fila["apellidoMaterno"]))
-        escribir_combobox_simple(page, "cbSexo", fila["SEXO"])
+        escribir_combobox_simple(page, "cbSexo", fila["SEXO"], "Sexo")
 
     escribir_campo_texto(page, "txtSueldoBase", str(fila["sueldoBase"]))
-    escribir_combobox_simple(page, "cbAFP", fila["AFP"])
-    escribir_combobox_simple(page, "cbIsapre", fila["ISAPRE"])
+    escribir_combobox_simple(page, "cbAFP", fila["AFP"], "AFP")
+    escribir_combobox_simple(page, "cbIsapre", fila["ISAPRE"], "Sistema de Salud")
     escribir_campo_texto(page, "calendarioFechaInicio_txtCalendar", formatear_fecha(fila["fechaContratacion"]))
     escribir_campo_texto(page, "calendarioFechaTermino_txtCalendar", formatear_fecha(fila["fechaTermino"]))
 
@@ -608,6 +756,10 @@ def main(argv=None):
                              "Pensado como paso previo de chequeo antes de --subir-documentos "
                              "(que de todas formas ya evita duplicar un tipo existente por su "
                              "cuenta). Se puede usar solo o junto con --subir-documentos.")
+    parser.add_argument("--solo-chequear", action="store_true",
+                        help="Revisa el Excel (y la carpeta de --subir-documentos, si se indica) "
+                             "sin abrir Chrome ni tocar el sitio, muestra lo que habría que "
+                             "corregir y termina.")
     args = parser.parse_args(argv)
 
     global NO_GUARDAR, LIMPIAR_DOCUMENTOS, SUBIR_DOCUMENTOS, VERIFICAR_DOCUMENTOS
@@ -627,12 +779,26 @@ def main(argv=None):
         if not os.path.isdir(SUBIR_DOCUMENTOS):
             print(f"ERROR: la carpeta de documentos '{SUBIR_DOCUMENTOS}' no existe.")
             sys.exit(1)
-        modo = "se subirán" if not NO_GUARDAR else "se llenará el form (Cancelar, sin subir)"
+        if args.solo_chequear:
+            modo = "solo se revisarán (sin subir nada)"
+        elif NO_GUARDAR:
+            modo = "se llenará el form (Cancelar, sin subir)"
+        else:
+            modo = "se subirán"
         print(f">>> --subir-documentos: {modo} los documentos de '{SUBIR_DOCUMENTOS}'.\n")
 
     df = cargar_excel(args.input, COLUMNAS_EXCEL_REQUERIDAS)
     df = autocompletar_campos_negocio(df)
-    print(f"Cargados {len(df)} colaboradores desde {args.input}")
+    print(f"Cargados {len(df)} colaboradores desde {args.input}\n")
+
+    # El chequeo previo corre siempre antes de tocar el sitio: no frena la
+    # corrida, pero deja a la vista lo que va a fallar. Con --solo-chequear
+    # se termina acá.
+    chequeo_carpeta = (chequear_carpeta_documentos(df, SUBIR_DOCUMENTOS)
+                       if SUBIR_DOCUMENTOS else None)
+    imprimir_chequeo_previo(chequear_datos_excel(df), chequeo_carpeta, SUBIR_DOCUMENTOS)
+    if args.solo_chequear:
+        return 0
 
     playwright, browser, page = conectar_a_chrome_existente()
     asegurar_pagina_trabajadores(page)
@@ -645,14 +811,9 @@ def main(argv=None):
     # detecta si una misma carpeta le calza a dos personas.
     carpetas_por_fila = {}
     carpetas_sin_dueno = []
-    if SUBIR_DOCUMENTOS:
-        asignacion, carpetas_sin_dueno = asignar_carpetas_lote(
-            SUBIR_DOCUMENTOS,
-            [(f["NOMBRES"], f["apellidoPaterno"], f["apellidoMaterno"]) for _, f in df.iterrows()])
+    if chequeo_carpeta is not None:
+        _, carpetas_sin_dueno, asignacion = chequeo_carpeta
         carpetas_por_fila = dict(zip(df.index, asignacion))
-        if carpetas_sin_dueno:
-            print(f"⚠ Carpetas que no calzan con nadie de la planilla "
-                  f"({len(carpetas_sin_dueno)}), no se usarán: {', '.join(carpetas_sin_dueno)}\n")
 
     for i, fila in df.iterrows():
         rut = str(fila["RUT"]).strip()
@@ -756,9 +917,12 @@ def main(argv=None):
                 limpiar_filtro(page)
 
         except Exception as e:
+            if isinstance(e, CampoNoCompletado):
+                detalle = f"No se pudo completar el formulario: {e}"
+            else:
+                detalle = f"Error inesperado durante el procesamiento: {e}"
             resultados.append(ResultadoFila(rut=rut, nombre_excel=nombre_completo,
-                                             estado="ERROR",
-                                             detalle=f"Error inesperado durante el procesamiento: {e}"))
+                                             estado="ERROR", detalle=detalle))
             print(f"   -> ERROR: {e}")
             try:
                 cerrar_formulario(page)
