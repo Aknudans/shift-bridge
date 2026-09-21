@@ -478,6 +478,12 @@ Detalles:
 **Carpeta → persona** (`_buscar_carpeta_persona`): subcarpetas
 `Nombre_Apellido`; calza si sus tokens `_norm` (≥2) son subconjunto de
 nombre + apellidos del Excel. Sin carpeta o ambigua → se reporta.
+🔴 **Asignación por lote** (`asignar_carpetas_lote`, 21/09/2026): las carpetas
+se reparten para TODO el Excel antes de empezar. Si una carpeta calza con más
+de una persona (p. ej. `Juan_Soto` con "Juan Carlos Soto Pérez" y "Juan Soto
+Rojas"), no se sube nada a ninguna de ellas y se reporta; antes, la persona
+sin carpeta propia recibía los documentos de la otra. Las carpetas que no
+calzan con nadie se avisan al inicio y en el resumen final.
 
 **Archivo → tipo** (`tipo_desde_nombre_archivo`, `documentos.py`): `_norm`
 ignora mayúsculas, tildes y separadores (` `, `-`, `_`, `.`, `,`). Primero
@@ -523,9 +529,11 @@ prefijo); si no, recorre `_MAPEO_NOMBRE_TIPO` en orden (gana el primero):
 - **`DOCUMENTOS_SET_ESTANDAR`**: los 8 tipos habituales de un ingreso
   (Cédula, Contrato puesta a disposición, Contacto en caso de Emergencia,
   Toma de conocimiento biométrico, Registro Entrega EPP, Capacitación Uso EPP,
-  Capacitación IRL, RIOHS). Tras subir, se compara `subidos + ya_existian`
-  contra el set y se agrega `⚠ FALTAN documentos del set estándar (N): …`.
-  No bloquea el proceso.
+  Capacitación IRL, RIOHS). Tras subir, se compara `subidos + ya_existian +
+  tipos_sitio` (todo lo leído de la grilla, sin prefijo del catálogo) contra
+  el set y se agrega `⚠ FALTAN documentos del set estándar (N): …`. Así, un
+  documento ya cargado que no viene en la carpeta no se reporta como
+  faltante. No bloquea el proceso.
 
 ### 11.9 Una sola visita a la vista de documentos por persona
 

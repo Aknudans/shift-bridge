@@ -95,6 +95,42 @@ def _buscar_carpeta_persona(base: str, nombre: str, ap_pat: str, ap_mat: str):
         return None, f"carpeta ambigua: {empatadas}"
     return os.path.join(base, candidatas[0][1]), ""
 
+
+# Reparte las carpetas entre todas las personas del lote de una vez, antes de
+# tocar el sitio. Buscar persona por persona no alcanzaba: una carpeta
+# "Juan_Soto" le calza tanto a "Juan Carlos Soto Pérez" como a "Juan Soto
+# Rojas", y si el segundo no tenía carpeta propia recibía los documentos del
+# primero sin ningún aviso. Si una carpeta le calza a más de una persona, no
+# se le sube a ninguna: subirle la cédula de alguien a la ficha de otro es peor
+# que no subir nada.
+# Devuelve, en el mismo orden de `personas` (tuplas nombre, apellido paterno,
+# apellido materno), la carpeta de cada una (o None y el motivo), y aparte las
+# carpetas que no le calzaron a nadie de la planilla.
+def asignar_carpetas_lote(base: str, personas):
+    asignacion = [_buscar_carpeta_persona(base, n, ap, am) for n, ap, am in personas]
+
+    duenos: dict[str, list[int]] = {}
+    for i, (ruta, _) in enumerate(asignacion):
+        if ruta:
+            duenos.setdefault(ruta, []).append(i)
+
+    for ruta, indices in duenos.items():
+        if len(indices) > 1:
+            nombres = "; ".join(" ".join(str(x) for x in personas[j]) for j in indices)
+            motivo = (f"la carpeta '{os.path.basename(ruta)}' calza con más de una persona "
+                      f"de la planilla ({nombres}); no se subió nada para no mezclar "
+                      f"documentos. Renombrar la carpeta con el nombre más completo")
+            for j in indices:
+                asignacion[j] = (None, motivo)
+
+    try:
+        subcarpetas = sorted(d for d in os.listdir(base)
+                             if os.path.isdir(os.path.join(base, d)))
+    except Exception:
+        subcarpetas = []
+    sin_dueno = [d for d in subcarpetas if os.path.join(base, d) not in duenos]
+    return asignacion, sin_dueno
+
 # Las cajas de texto del formulario. Por suerte se llaman igual al crear que
 # al editar, así que el mismo código sirve para los dos casos.
 CAMPOS_TEXTO = {
@@ -210,9 +246,12 @@ def _notas_documentos(docs: dict, omitidos: list) -> tuple[list[str], bool]:
         # Si falta alguno de los documentos habituales no se frena nada, solo
         # queda la advertencia en el reporte. Lo que la persona ya tenía
         # cargado cuenta como presente aunque no venga en la carpeta de ahora.
-        presentes_norm = {normalizar_texto(t) for t in (subidos + ya_existian)}
+        # Se compara sin el prefijo "LOGISTICA FALABELLA/" por si la grilla
+        # del sitio lo muestra.
+        presentes_norm = {quitar_prefijo_catalogo(t) for t in
+                          (subidos + ya_existian + (docs.get("tipos_sitio") or []))}
         faltantes = [t for t in DOCUMENTOS_SET_ESTANDAR
-                     if normalizar_texto(t) not in presentes_norm]
+                     if quitar_prefijo_catalogo(t) not in presentes_norm]
         if faltantes:
             nota += (f" | ⚠ FALTAN documentos del set estándar ({len(faltantes)}): "
                      + ", ".join(faltantes))
@@ -602,6 +641,19 @@ def main(argv=None):
     grupo_actual = None
     docs_incompletos = 0  # gente a la que le faltó algún documento del set
 
+    # Las carpetas se reparten para todo el lote antes de empezar, así se
+    # detecta si una misma carpeta le calza a dos personas.
+    carpetas_por_fila = {}
+    carpetas_sin_dueno = []
+    if SUBIR_DOCUMENTOS:
+        asignacion, carpetas_sin_dueno = asignar_carpetas_lote(
+            SUBIR_DOCUMENTOS,
+            [(f["NOMBRES"], f["apellidoPaterno"], f["apellidoMaterno"]) for _, f in df.iterrows()])
+        carpetas_por_fila = dict(zip(df.index, asignacion))
+        if carpetas_sin_dueno:
+            print(f"⚠ Carpetas que no calzan con nadie de la planilla "
+                  f"({len(carpetas_sin_dueno)}), no se usarán: {', '.join(carpetas_sin_dueno)}\n")
+
     for i, fila in df.iterrows():
         rut = str(fila["RUT"]).strip()
         nombre_completo = f"{fila['NOMBRES']} {fila['apellidoPaterno']}"
@@ -642,9 +694,7 @@ def main(argv=None):
             # falta entrar a la pantalla de documentos.
             items, omitidos = None, []
             if quiere_subir:
-                carpeta, motivo = _buscar_carpeta_persona(
-                    SUBIR_DOCUMENTOS, fila["NOMBRES"],
-                    fila["apellidoPaterno"], fila["apellidoMaterno"])
+                carpeta, motivo = carpetas_por_fila[i]
                 nota_carpeta = ""
                 if not carpeta:
                     nota_carpeta = f"⚠ FALTAN TODOS los documentos: {motivo}"
@@ -731,6 +781,9 @@ def main(argv=None):
     if SUBIR_DOCUMENTOS and docs_incompletos:
         print(f"⚠ {docs_incompletos} persona(s) con documentos faltantes del set estándar "
               f"— revisar el detalle de cada fila en {args.output}.")
+    if carpetas_sin_dueno:
+        print(f"⚠ {len(carpetas_sin_dueno)} carpeta(s) no calzaron con nadie de la planilla "
+              f"y no se usaron: {', '.join(carpetas_sin_dueno)}")
 
     # En modo prueba se deja el navegador abierto para poder revisar.
     if not NO_GUARDAR:

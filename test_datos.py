@@ -17,6 +17,7 @@ import pandas as pd
 from shift_common import normalizar_sexo, normalizar_texto, quitar_prefijo_catalogo
 from crear_o_editar import (
     _buscar_carpeta_persona,
+    asignar_carpetas_lote,
     _vacio,
     autocompletar_campos_negocio,
     formatear_fecha,
@@ -133,6 +134,45 @@ def test_buscar_carpeta_persona():
         shutil.rmtree(base, ignore_errors=True)
 
 
+# Una carpeta que le calza a dos personas no se le da a ninguna. Antes "Juan
+# Soto Rojas", sin carpeta propia, recibía los documentos de "Juan Carlos Soto
+# Pérez" porque "Juan_Soto" le calzaba a los dos.
+def test_asignar_carpetas_lote():
+    base = tempfile.mkdtemp()
+    try:
+        for nombre in ("Juan_Soto", "Ana_Rojas", "Pedro_Extra"):
+            os.makedirs(os.path.join(base, nombre))
+        personas = [
+            ("Juan Carlos", "Soto", "Pérez"),
+            ("Ana María", "Rojas", "Vera"),
+            ("Juan", "Soto", "Rojas"),
+            ("Karen", "Bravo", "Díaz"),
+        ]
+
+        asignacion, sin_dueno = asignar_carpetas_lote(base, personas)
+
+        # Los dos Juan quedan sin carpeta, con el motivo.
+        for j in (0, 2):
+            ruta, motivo = asignacion[j]
+            assert ruta is None
+            assert "más de una persona" in motivo and "Juan_Soto" in motivo
+        # A los demás no les cambia nada.
+        assert asignacion[1] == (os.path.join(base, "Ana_Rojas"), "")
+        assert asignacion[3][0] is None and "sin carpeta" in asignacion[3][1]
+        # La carpeta de alguien que no está en la planilla se avisa.
+        assert sin_dueno == ["Pedro_Extra"]
+
+        # Con una carpeta más completa se resuelve: la de tres palabras le
+        # gana a la de dos, y "Carlos" no está en el nombre del otro Juan.
+        os.makedirs(os.path.join(base, "Juan_Carlos_Soto"))
+        asignacion, sin_dueno = asignar_carpetas_lote(base, personas)
+        assert asignacion[0][0] == os.path.join(base, "Juan_Carlos_Soto")
+        assert asignacion[2][0] == os.path.join(base, "Juan_Soto")
+        assert sin_dueno == ["Pedro_Extra"]
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 # Los archivos que no sirven quedan aparte, con el motivo, en vez de perderse.
 def test_preparar_items_carpeta():
     base = tempfile.mkdtemp()
@@ -188,6 +228,24 @@ def test_notas_documentos():
     assert "ya tenía, no se re-subió (1)" in notas[1]
     assert "omitidos: foto.jpg (no calza)" in notas[1]
 
+    # Lo que ya estaba cargado en el sitio cuenta como presente aunque no
+    # venga en la carpeta; antes se reportaba como faltante. La grilla puede
+    # traer el prefijo del catálogo.
+    from documentos import DOCUMENTOS_SET_ESTANDAR
+    en_sitio = ["LOGISTICA FALABELLA/" + t for t in DOCUMENTOS_SET_ESTANDAR[1:]]
+    docs = {
+        "sin_rut": False, "limpieza": None, "tipos": None,
+        "subida": ("subido", ["Cédula de Identidad"], [], []),
+        "tipos_sitio": en_sitio,
+    }
+    notas, faltan = _notas_documentos(docs, [])
+    assert not faltan and "FALTAN" not in notas[0], notas
+
+    # Y si en el sitio falta uno, se avisa solo ese.
+    docs["tipos_sitio"] = en_sitio[:-1]
+    notas, faltan = _notas_documentos(docs, [])
+    assert faltan and "FALTAN documentos del set estándar (1)" in notas[0], notas
+
 
 # El punto de toda la optimización: una sola visita a la pantalla de
 # documentos por persona, en el orden correcto, y volviendo siempre a la lista.
@@ -218,9 +276,11 @@ def test_gestionar_documentos_una_sola_visita():
     doc._volver_a_trabajadores = _registrar("_volver_a_trabajadores", None)
 
     try:
-        doc.gestionar_documentos_trabajador(
+        resultado = doc.gestionar_documentos_trabajador(
             page=None, rut="1-9", grupo_proveedor="Grupo X",
             limpiar="borrar", verificar=True, items=[{"tipo": "Anexos"}])
+        # Lo leído del sitio queda disponible para el cálculo de faltantes.
+        assert resultado["tipos_sitio"] == ["Cédula de Identidad"]
 
         assert llamadas == [
             "_abrir_vista_documentos",

@@ -611,7 +611,11 @@ def gestionar_documentos_trabajador(
     periodo_ddmmaaaa: str = "", vencimiento_ddmmaaaa: str = "",
     guardar: bool = True, omitir_existentes: bool = True,
 ):
-    resultado = {"sin_rut": False, "limpieza": None, "tipos": None, "subida": None}
+    # "tipos_sitio" es lo que se leyó de la grilla aunque no se haya pedido
+    # verificar: sirve para no reportar como faltante algo que la persona ya
+    # tenía cargado y que simplemente no venía en la carpeta.
+    resultado = {"sin_rut": False, "limpieza": None, "tipos": None, "subida": None,
+                 "tipos_sitio": None}
     if not (limpiar or verificar or items):
         return resultado
 
@@ -627,6 +631,7 @@ def gestionar_documentos_trabajador(
         tipos = None
         if verificar or (items and omitir_existentes):
             tipos = _leer_tipos_en_vista_abierta(page)
+            resultado["tipos_sitio"] = tipos
             if verificar:
                 resultado["tipos"] = tipos
 
