@@ -4,6 +4,16 @@ Automatización de la carga de colaboradores y sus documentos en
 **ShiftLaboral** (`https://externoslof.shiftlabor.com/`), el sistema de
 "Control Externos" de LOGISTICA FALABELLA.
 
+## Descarga
+
+**[⬇ Descargar ShiftLaboralBot-windows.zip](https://github.com/Aknudans/shift-bridge/releases/latest/download/ShiftLaboralBot-windows.zip)**
+(última versión; historial en [Releases](https://github.com/Aknudans/shift-bridge/releases)).
+
+El `.zip` trae el ejecutable (`ShiftLaboralBot.exe` + carpeta `_internal/`,
+que deben ir juntos), una planilla de ejemplo `SHIFT_ejemplo.xlsx` con una
+fila ficticia y la guía `GUIA_EJECUCION.txt`. Descomprimirlo completo y
+ejecutar `ShiftLaboralBot.exe`; no requiere Python, sí Google Chrome.
+
 ## Objetivo del proyecto
 
 La empresa obtiene los datos de sus colaboradores desde Talana y debe
