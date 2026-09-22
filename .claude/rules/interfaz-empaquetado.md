@@ -20,6 +20,11 @@ paths:
   `%ProgramFiles(x86)%` y `%LOCALAPPDATA%`; si no lo encuentra, permite
   elegirlo a mano (lo recuerda en la sesión). Los `.bat` usan la misma
   búsqueda.
+- **Nombre del reporte (22/09/2026)**: `_sugerir_nombre_reporte` propone
+  `reporte[_crear]_AAAAMMDD_HHMMSS.xlsx` y lo renueva al cambiar de modo y al
+  apretar Iniciar, salvo que la persona haya escrito o elegido otro
+  (`salida_sugerida` guarda el último propuesto). Los defaults de consola
+  (`--output`) siguen siendo `reporte.xlsx` / `reporte_crear.xlsx`.
 - **Log (22/09/2026)**: la ventana toma el alto de la pantalla (hasta 1000 px).
   "Ampliar log" oculta los pasos 1-3 y las opciones (`marcos_configuracion`,
   se re-empaquetan con `before=self.marco_accion`), y se activa solo al

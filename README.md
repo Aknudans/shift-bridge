@@ -109,9 +109,13 @@ Estas opciones no aparecen en el modo Comparación, que nunca modifica nada.
   - *Borrarlos (no se puede deshacer)* — pide una confirmación adicional al
     iniciar.
 
-> ⚠ El **modo prueba NO protege el borrado** de documentos: con «Borrarlos»,
-> los documentos se eliminan de todas formas y no se pueden recuperar. Los
-> documentos cargados por el mandante nunca se tocan.
+> En **modo prueba no se borra nada**, aunque se elija «Borrarlos»: el reporte
+> muestra los documentos que se borrarían y, con el primero, se prueba el botón
+> borrar cancelando la confirmación. Además se guarda en la carpeta `capturas`
+> una imagen del panel de carga lleno de cada persona.
+>
+> ⚠ Fuera del modo prueba, «Borrarlos» elimina los documentos de verdad y no
+> se pueden recuperar. Los documentos cargados por el mandante nunca se tocan.
 
 ### Paso 5 — Iniciar y seguir el avance
 

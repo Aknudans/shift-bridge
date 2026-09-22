@@ -156,6 +156,13 @@ Esperar explícitamente al elemento que se necesita (`wait_for_function` /
 7. **Filtro RUT**: `#grillaExternosProveedorTrabajadores_DXFREditorcol2_I`
    (click + fill + Enter). Deja 0 o 1 fila. La detección de "encontrado" se
    hace por contenido de celda, no por la clase `tr.dxgvDataRow`.
+   🔴 **Coincidencia exacta (22/09/2026)**: `buscar_rut` cuenta celdas cuyo
+   texto (sin puntos/espacios, en mayúsculas) es el RUT exacto y celdas que
+   solo lo contienen. Si hay alguna parcial de más (p. ej. `11234567-8` al
+   buscar `1234567-8`), lanza `RutAmbiguoEnGrilla` y la fila queda en ERROR
+   sin tocar nada: los botones "ver"/"editar"/link RUT usan `.first` y podrían
+   abrir a otra persona. Antes era `td:has-text(rut)` (substring). Falta
+   validarlo en vivo.
 8. **Botón "ver"**: `a[title="ver"]` (`.first`). No usar el id largo por índice.
 9. **Leer "Datos Trabajador"** con JS que compara `textContent.trim()` del
    `<td>` y toma `nextElementSibling` (el locator `td:text-is(...)` falla con
@@ -386,7 +393,7 @@ editable o bloqueado con valor precargado y, si está bloqueado:
 
 Detalle en `.claude/rules/documentos.md` (se carga al trabajar con `documentos.py` o `test_datos.py`; leerlo antes de tocar la lógica de documentos desde otro archivo).
 
-- ⚠️ `--no-guardar` **NO** protege el borrado: con `--limpiar-documentos borrar` los documentos se borran igual (la ayuda de la interfaz lo advierte).
+- ⚠️ Desde el 22/09/2026, `--no-guardar` **sí protege el borrado**: con `--limpiar-documentos borrar` se listan los documentos que se borrarían y, con el primero, se prueba el clic en borrar y se aprieta **Cancelar** en la confirmación (`_probar_clic_borrar_y_cancelar`); Aceptar nunca se aprieta. Sin `--no-guardar`, `borrar` elimina de verdad.
 
 ### 11.10 Interfaz gráfica y 11.12 Empaquetado
 
@@ -432,8 +439,11 @@ que se indica aquí.
    chequeo previo (11.8b). Falta usarlo en un lote real.
 7. **Completar `tipos_documento.py`** (palabras clave por tipo) a medida que
    aparezcan nombres de archivo nuevos; correr `test_datos.py` después de cada cambio.
-8. **Decidir si `--no-guardar` debe forzar la limpieza a `listar`** (hoy no
-   protege el borrado; cambiarlo alteraría un comportamiento existente).
+8. ~~Decidir si `--no-guardar` debe proteger el borrado~~ → hecho (22/09/2026):
+   en modo prueba se lista y se prueba el clic en borrar cancelando la
+   confirmación. Falta validar en vivo el selector `#btnConfirmacionBorrarCancelar`
+   (o `_2`). En modo prueba se guarda además una captura del panel de carga en
+   `capturas/` (ignorada por git).
 
 ### Prioridad BAJA
 9. **Período de tipos Mensual/Anual** (Liquidaciones, EPP anual): sin

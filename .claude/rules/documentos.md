@@ -30,8 +30,15 @@ proveedor en un registro anterior.
 - Anti-loop: corta si el mismo documento se intenta borrar 2 veces seguidas;
   tope de 300 iteraciones.
 - Solo corre para filas `preexistente=True` y estado ≠ ERROR.
-- ⚠️ `--no-guardar` **NO** protege el borrado: con `borrar` los documentos se
-  borran igual (la ayuda de la interfaz lo advierte).
+- ⚠️ Con `--no-guardar` + `borrar` (22/09/2026) NO se borra: `simular=True` lista
+  todo y `_probar_clic_borrar_y_cancelar` aprieta borrar en el primero y Cancelar
+  (`SEL_CONFIRMAR_CANCELAR`) en la confirmación. Estado `simulado`, reporte
+  "Docs que se BORRARÍAN". Selector de Cancelar sin validar en vivo.
+- **Captura en modo prueba**: `_capturar_panel_carga` guarda
+  `capturas/panel_<RUT>_<fecha>.png` antes de cancelar el panel. Expande el
+  scroll interno para que salgan todas las filas y **restaura los estilos**
+  después: sin restaurar, el panel queda más alto que la ventana y Cancelar no
+  se puede apretar (se vio con una grilla simulada).
 
 ### 11.7 Carga masiva de documentos (`--subir-documentos CARPETA`)
 
@@ -116,7 +123,11 @@ palabra genérica (`EPP`, `CONTRATO`).
 
 Antes de conectar a Chrome, `crear_o_editar.main()` corre siempre
 `chequear_datos_excel` (celdas obligatorias vacías; AFP / Sistema de Salud
-fuera de `CATALOGO_AFP` / `CATALOGO_SALUD`, comparando sin tildes) y, con
+fuera de `CATALOGO_AFP` / `CATALOGO_SALUD`, comparando sin tildes; desde el
+22/09/2026 también RUT con formato o dígito verificador inválido
+(`problema_rut` en `shift_common.py`), RUT repetido en varias filas, Sexo
+distinto de Masculino/Femenino y Proveedor fuera de
+`GRUPOS_PROVEEDOR_CONOCIDOS`) y, con
 `--subir-documentos`, `chequear_carpeta_documentos` (reusa
 `asignar_carpetas_lote` y `preparar_items_carpeta`): personas sin carpeta con
 el nombre sugerido (`_carpeta_sugerida`), carpetas sin dueño, archivos no
@@ -125,6 +136,17 @@ del set estándar. Lo imprime `imprimir_chequeo_previo`; no frena la corrida.
 La asignación calculada se reutiliza en el lote. `--solo-chequear` termina
 tras el chequeo sin abrir Chrome; en la interfaz es el botón **"Revisar antes
 de iniciar"**.
+
+**Aviso y confirmación (22/09/2026)**: si hay problemas, se escribe
+`<output>_chequeo.xlsx` (`filas_reporte_chequeo`: una fila por problema,
+ERROR / ADVERTENCIA; `--reporte-chequeo` cambia la ruta). En la interfaz,
+Iniciar en modo crear/documentos corre primero `--solo-chequear` (fase
+`chequeo_previo`), lee `Resumen chequeo: N persona(s)` y `Reporte del chequeo
+previo guardado en: …` del log y, si N > 0, pregunta si continuar antes de
+lanzar la corrida real (`comando_pendiente`); la comparación va directo. Por
+consola, `main()` pregunta con `input()` solo si `sys.stdin.isatty()`; la
+interfaz lanza los subprocesos con `stdin=DEVNULL` para que nunca se queden
+esperando.
 
 ### 11.9 Una sola visita a la vista de documentos por persona
 
