@@ -267,7 +267,17 @@ def test_norm():
 def test_tipo_desde_nombre_archivo():
     casos = {
         "C.I ADAN LEON.pdf": "Cédula de Identidad",
-        "CD FALABELLA RETAIL.pdf": "Contrato puesta a disposición",
+        # "CD" es el contrato de trabajo, no la puesta a disposición
+        # (corregido el 22/09/2026: se subía con el tipo equivocado).
+        "CD FALABELLA RETAIL.pdf": "Contrato de Trabajo",
+        "CD FALABELLA RETAIL -.pdf": "Contrato de Trabajo",
+        "CPD ADAN LEON.pdf": "Contrato puesta a disposición",
+        # Nombre literal con el que llegan: hay variante "letra E" y "letra C",
+        # las dos van al mismo tipo. La fecha del final no molesta.
+        "Contrato puesta a disposición letra E - 01-SEPTIEMBRE 206.pdf":
+            "Contrato puesta a disposición",
+        "Contrato puesta a disposicion letra C - 01-SEPTIEMBRE 2026.pdf":
+            "Contrato puesta a disposición",
         "MARCAJE BIOMETRICO.pdf": "Toma de conocimiento marca en biometrico (EST)",
         "irl adan leon.pdf": "Registro de Capacitación IRL (Ex Odi) Mandante",
         "riohs adan leon.pdf": "TC Reglamento Interno RIOHS mandante",

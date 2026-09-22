@@ -416,6 +416,13 @@ Rama `main`. Todo lo anterior está implementado y validado en vivo salvo lo
 que se indica aquí.
 
 ### Prioridad ALTA
+0. **Validar en vivo la paginación de documentos** (`_ir_a_pagina`, arreglada
+   el 22/09/2026 — ver `.claude/rules/documentos.md`). Con
+   `--verificar-documentos` sobre una persona de más de 10 documentos
+   (`21826722-K` Gabriel Quezada, que tenía 20 entradas con la mitad
+   repetida), la nota `Docs actuales` debe mostrar la lista real sin
+   repeticiones. Hasta confirmarlo, el anti-duplicado no es confiable para
+   gente con más de una página de documentos.
 1. **Lote real grande (5-10+ personas)** con crear/editar +
    `--subir-documentos` (+ `--limpiar-documentos borrar` sobre alguna
    identidad preexistente). Hasta ahora las corridas fueron de 1-2 personas;
@@ -445,6 +452,8 @@ que se indica aquí.
    chequeo previo (11.8b). Falta usarlo en un lote real.
 7. **Completar `tipos_documento.py`** (palabras clave por tipo) a medida que
    aparezcan nombres de archivo nuevos; correr `test_datos.py` después de cada cambio.
+   Falta el tipo `TC Procedimiento de Trabajo Seguro`, que existe en el sitio
+   (visto en `21826722-K` y `27995448-3`) y hoy no se reconoce.
 8. ~~Decidir si `--no-guardar` debe proteger el borrado~~ → hecho (22/09/2026):
    en modo prueba se lista y se prueba el clic en borrar cancelando la
    confirmación. Falta validar en vivo el selector `#btnConfirmacionBorrarCancelar`

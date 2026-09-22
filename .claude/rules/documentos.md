@@ -27,6 +27,20 @@ proveedor en un registro anterior.
 - Antes de cada clic: `_esperar_sin_overlays` y `_cerrar_dialogo_abierto`.
 - **La grilla pagina de a 10**: se recorren todas las páginas
   (`_total_paginas`, `_ir_a_pagina`).
+  🔴 **`_ir_a_pagina` arreglada (22/09/2026)**: usaba un clic por
+  `page.evaluate` y `wait_for_load_state("networkidle")`, las dos cosas que
+  `CLAUDE.md` sección 6 desaconseja para este sitio. La grilla **nunca
+  cambiaba de página**: se leía la primera dos veces y los documentos de la
+  página 2 en adelante quedaban invisibles. Se detectó en el reporte del
+  22/09/2026: las 5 personas con más de 10 documentos daban exactamente 20
+  entradas, con la primera mitad idéntica a la segunda. Ahora hace **clic
+  real** (`a:visible:text-is("N")` dentro de
+  `#grillaExternosDocumentosTrabajador`) y espera con `wait_for_function` a
+  que el indicador `Página N de M` muestre la página pedida
+  (`_JS_ESTA_EN_PAGINA`); devuelve True solo si llegó. `_pagina_actual`
+  devuelve 0 cuando no hay paginador (10 documentos o menos). Los tres
+  recorridos que la usan **saltean** la página que no se pudo abrir, porque
+  leerla igual repetiría la anterior. Falta validarlo en vivo.
 - Anti-loop: corta si el mismo documento se intenta borrar 2 veces seguidas;
   tope de 300 iteraciones.
 - Solo corre para filas `preexistente=True` y estado ≠ ERROR.
@@ -97,6 +111,22 @@ palabra genérica (`EPP`, `CONTRATO`).
   explícitamente **`LOGISTICA FALABELLA/Contrato de Trabajo`**. Para que
   "Anexo contrato trabajo" no se tome como contrato, Anexos de Contrato tiene
   la alternativa de 3 palabras `ANEXO CONTRATO TRABAJO`, que gana a la de 2.
+- 🔴 **`CD` es el contrato de trabajo (22/09/2026)**: el archivo llega como
+  **`CD FALABELLA RETAIL.pdf`** (CD = contrato) y estaba en las alternativas
+  de *Contrato puesta a disposición*, así que se subía con el tipo equivocado
+  a las 40 personas del lote. Ahora `CD` y `CD FALABELLA RETAIL` están en
+  **Contrato de Trabajo**; *Contrato puesta a disposición* conserva `CPD`,
+  `CONTRATO DISPOSICION` y `CONTRATO PUESTA`. Lo confirmó el catálogo real:
+  en el reporte del 22/09/2026 las 43 personas tenían cargado
+  `Contrato de Trabajo` y solo 2 un `Contrato puesta a disposición`.
+- **Contrato puesta a disposición**: llega con el nombre completo y fecha
+  (`Contrato puesta a disposición letra E - 01-SEPTIEMBRE 206.pdf`). Hay
+  variante **letra E** y **letra C**: son el mismo tipo del sitio, solo cambia
+  el nombre del archivo, y las dos calzan por `CONTRATO PUESTA` /
+  `CONTRATO DISPOSICION` sin reglas extra. Casos fijados en `test_datos.py`.
+- **Tipo del sitio sin regla**: `TC Procedimiento de Trabajo Seguro` existe en
+  el catálogo (visto en `21826722-K` y `27995448-3`) pero no está en
+  `tipos_documento.py`; un archivo de ese tipo hoy queda sin reconocer.
 - `_seleccionar_tipo_en_combo` elige la opción del `<select>` quitando el
   prefijo `LOGISTICA FALABELLA/` y comparando el resto **exacto** (tras
   normalizar). Si el sitio renombra un tipo, hay que cambiarlo también en
@@ -110,10 +140,16 @@ palabra genérica (`EPP`, `CONTRATO`).
 - **`omitir_existentes=True`** (default) en la subida: se saltan los tipos ya
   cargados; el reporte los muestra como "ya tenía, no se re-subió (N)". Estado
   `sin_items_nuevos` si no queda nada por subir.
-- **`DOCUMENTOS_SET_ESTANDAR`**: los 8 tipos habituales de un ingreso
-  (Cédula, Contrato puesta a disposición, Contacto en caso de Emergencia,
-  Toma de conocimiento biométrico, Registro Entrega EPP, Capacitación Uso EPP,
-  Capacitación IRL, RIOHS). Tras subir, se compara `subidos + ya_existian +
+- **`DOCUMENTOS_SET_ESTANDAR`**: los 9 tipos habituales de un ingreso
+  (Cédula, **Contrato de Trabajo**, Contrato puesta a disposición, Contacto en
+  caso de Emergencia, Toma de conocimiento biométrico, Registro Entrega EPP,
+  Capacitación Uso EPP, Capacitación IRL, RIOHS). Pasó de 8 a 9 el 22/09/2026,
+  junto con la corrección de `CD`: el de trabajo llega siempre y el de puesta
+  a disposición puede venir o no. ⚠️ Como el chequeo previo solo mira la
+  carpeta, hoy avisa `faltan del set estándar (1): Contrato puesta a
+  disposición` en todas las personas cuya carpeta no lo traiga; contra el
+  sitio, a quien ya lo tenga cargado no se le avisa.
+  Tras subir, se compara `subidos + ya_existian +
   tipos_sitio` (todo lo leído de la grilla, sin prefijo del catálogo) contra
   el set y se agrega `⚠ FALTAN documentos del set estándar (N): …`. Así, un
   documento ya cargado que no viene en la carpeta no se reporta como

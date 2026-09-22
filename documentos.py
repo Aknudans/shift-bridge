@@ -157,21 +157,55 @@ def _total_paginas(page: Page) -> int:
         return 1
 
 
+_JS_PAGINA_ACTUAL = r"""() => {
+    const t = document.body.innerText.match(/P.gina\s+(\d+)\s+de\s+\d+/);
+    return t ? parseInt(t[1]) : 0;
+}"""
+
+_JS_ESTA_EN_PAGINA = r"""(n) => {
+    const t = document.body.innerText.match(/P.gina\s+(\d+)\s+de\s+\d+/);
+    return t ? parseInt(t[1]) === n : false;
+}"""
+
+
+# En qué página está parada la grilla ahora. Devuelve 0 si no hay paginador,
+# que es lo que pasa cuando la persona tiene 10 documentos o menos.
+def _pagina_actual(page: Page) -> int:
+    try:
+        return int(page.evaluate(_JS_PAGINA_ACTUAL))
+    except Exception:
+        return 0
+
+
+# Mueve la grilla a la página pedida. Devuelve True solo si al terminar la
+# grilla está efectivamente en esa página.
+#
+# 🔴 El paginador es DevExpress: no responde a un click hecho con
+# page.evaluate (ver CLAUDE.md, sección 6), y networkidle no garantiza que el
+# callback haya terminado. Con las dos cosas juntas la grilla nunca cambiaba
+# de página: se leía la primera dos veces y los documentos de la página 2 en
+# adelante quedaban invisibles, así que el anti-duplicado los daba por
+# ausentes y los volvía a subir (visto el 22/09/2026 en las 5 personas del
+# lote con más de 10 documentos, todas con 20 entradas = 10 repetidas).
 def _ir_a_pagina(page: Page, n: int) -> bool:
-    clic = page.evaluate(
-        """(n) => {
-            const cont = document.getElementById('grillaExternosDocumentosTrabajador');
-            if (!cont) return false;
-            const a = Array.from(cont.querySelectorAll('a'))
-                .find(x => x.offsetParent !== null && x.textContent.trim() === String(n));
-            if (a) { a.click(); return true; }
-            return false;
-        }""",
-        n,
-    )
-    page.wait_for_load_state("networkidle")
+    actual = _pagina_actual(page)
+    if actual == n or (actual == 0 and n == 1):
+        return True
+
+    enlace = page.locator(
+        f'#grillaExternosDocumentosTrabajador a:visible:text-is("{n}")').first
+    try:
+        enlace.click(timeout=5000)
+    except Exception:
+        return False
+
+    # Esperar al dato que se necesita, no a la red.
+    try:
+        page.wait_for_function(_JS_ESTA_EN_PAGINA, arg=n, timeout=10000)
+    except Exception:
+        return False
     _esperar_sin_overlays(page)
-    return clic
+    return True
 
 
 # Deja sin documentación a alguien que ya venía cargado de antes. Solo se
@@ -188,7 +222,8 @@ def _limpiar_en_vista_abierta(page: Page, borrar: bool = False,
     # Se para en la primera página donde todavía quede algo por borrar.
     def _pagina_con_borrable():
         for pg_n in range(1, _total_paginas(page) + 1):
-            _ir_a_pagina(page, pg_n)
+            if not _ir_a_pagina(page, pg_n):
+                continue
             if page.locator(SEL_BORRAR).count() > 0:
                 return True
         return False
@@ -197,7 +232,8 @@ def _limpiar_en_vista_abierta(page: Page, borrar: bool = False,
     if not borrar or simular:
         vistos: list[str] = []
         for pg_n in range(1, _total_paginas(page) + 1):
-            _ir_a_pagina(page, pg_n)
+            if not _ir_a_pagina(page, pg_n):
+                continue
             vistos.extend(page.evaluate(_JS_LISTAR))
         if not borrar:
             return ("listado", vistos)
@@ -281,7 +317,10 @@ def _leer_tipos_en_vista_abierta(page: Page) -> list[str]:
     _esperar_sin_overlays(page)
     tipos: list[str] = []
     for pg_n in range(1, _total_paginas(page) + 1):
-        _ir_a_pagina(page, pg_n)
+        # Si no se pudo llegar a la página, se saltea: leerla igual repetiría
+        # la página anterior y esos duplicados falsean el anti-duplicado.
+        if not _ir_a_pagina(page, pg_n):
+            continue
         tipos.extend(page.evaluate(_JS_LISTAR_TIPOS))
     return tipos
 
@@ -316,6 +355,10 @@ CATALOGO_TIPOS_DOCUMENTO = [tipo for tipo, _ in REGLAS_TIPO_DOCUMENTO]
 # falta alguno no se frena nada, solo queda avisado en el reporte.
 DOCUMENTOS_SET_ESTANDAR = [
     "Cédula de Identidad",
+    # Los dos contratos: el de trabajo llega siempre (el archivo
+    # "CD FALABELLA RETAIL"), el de puesta a disposición puede venir o no
+    # ("Contrato puesta a disposición letra E/C - ...").
+    "Contrato de Trabajo",
     "Contrato puesta a disposición",
     "Contacto en caso de Emergencia",
     "Toma de conocimiento marca en biometrico (EST)",

@@ -48,9 +48,12 @@ REGLAS_TIPO_DOCUMENTO = [
     ("Cédula de Identidad",
      ["CEDULA", "CARNET", "CI", "C I"]),
     ("Contrato puesta a disposición",
-     ["CPD", "CD", "CONTRATO DISPOSICION", "CONTRATO PUESTA"]),
+     ["CPD", "CONTRATO DISPOSICION", "CONTRATO PUESTA"]),
+    # Los archivos del contrato de trabajo llegan como "CD FALABELLA RETAIL"
+    # (CD = contrato). Hasta el 22/09/2026 "CD" estaba en Contrato puesta a
+    # disposición y los subía a todos con el tipo equivocado.
     ("Contrato de Trabajo",
-     ["CONTRATO TRABAJO"]),
+     ["CONTRATO TRABAJO", "CD FALABELLA RETAIL", "CD"]),
     ("Anexos de Contrato",
      ["ANEXO CONTRATO", "ANEXO CONTRATO TRABAJO"]),
     ("Anexos de contrato personal EST",
