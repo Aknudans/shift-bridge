@@ -15,6 +15,7 @@ from shift_common import (
     limpiar_filtro,
     normalizar_texto,
     quitar_prefijo_catalogo,
+    RutAmbiguoEnGrilla,
     seleccionar_grupo_proveedor,
 )
 
@@ -224,7 +225,8 @@ def main(argv=None):
         except Exception as e:
             resultados.append(ResultadoFila(rut=rut, nombre_excel=nombre_completo,
                                              estado="ERROR",
-                                             detalle=f"Error inesperado durante el procesamiento: {e}"))
+                                             detalle=(str(e) if isinstance(e, RutAmbiguoEnGrilla)
+                                                      else f"Error inesperado durante el procesamiento: {e}")))
             print(f"   -> ERROR: {e}")
             # Se intenta dejar la página en orden para la fila siguiente.
             try:

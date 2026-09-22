@@ -24,6 +24,9 @@ __pycache__/
 build/
 dist/
 
+# Capturas del panel de carga en modo prueba: muestran RUT y documentos reales.
+capturas/
+
 # Configuracion local de Claude Code (especifica de esta maquina)
 .claude/*
 # Las reglas de carga diferida para Claude Code sí se versionan

@@ -5,6 +5,7 @@ from playwright.sync_api import Page
 
 from shift_common import (
     BASE_URL,
+    normalizar_rut,
     normalizar_texto,
     seleccionar_grupo_proveedor,
     buscar_rut,
@@ -15,6 +16,7 @@ SEL_LINK_RUT = 'a[id*="link_Codigo_0"]'          # el RUT de la fila, que es el 
 SEL_FILA_DOC = "tr.dxgvDataRow"
 SEL_BORRAR = 'a[title="borrar"]'
 SEL_CONFIRMAR = "#btnConfirmacionBorrarAceptar"
+SEL_CONFIRMAR_CANCELAR = ["#btnConfirmacionBorrarCancelar_2", "#btnConfirmacionBorrarCancelar"]
 SEL_EXITO_OK = "#btnExitoAceptar_grillaExternosDocumentosTrabajador"
 SEL_ERROR_OK = "#btnBorrarNoExitosoAceptar"
 
@@ -107,14 +109,36 @@ def _click_primero_visible(page: Page, selectores, timeout=3000) -> bool:
     return False
 
 
+# Modo prueba del borrado: aprieta "borrar" en el primer documento borrable,
+# espera la confirmación y aprieta Cancelar. Comprueba que el botón y la
+# confirmación existen sin borrar nada. Devuelve una línea para el reporte.
+def _probar_clic_borrar_y_cancelar(page: Page, ir_a_pagina_con_borrable) -> str:
+    try:
+        if not ir_a_pagina_con_borrable():
+            return "[prueba de borrado: no se encontró el botón borrar]"
+        page.locator(SEL_BORRAR).first.click(timeout=8000)
+        page.wait_for_selector(SEL_CONFIRMAR, state="visible", timeout=6000)
+    except Exception as e:
+        _cerrar_dialogo_abierto(page)
+        return f"[prueba de borrado: no apareció la confirmación ({e})]"
+    if not _click_primero_visible(page, SEL_CONFIRMAR_CANCELAR, timeout=5000):
+        return ("[⚠ prueba de borrado: se abrió la confirmación pero no se encontró "
+                "Cancelar; revisar en ShiftLaboral que no haya quedado abierta]")
+    try:
+        page.wait_for_selector(SEL_CONFIRMAR, state="hidden", timeout=6000)
+    except Exception:
+        return "[⚠ prueba de borrado: la confirmación sigue visible tras Cancelar]"
+    _esperar_sin_overlays(page)
+    return "[prueba de borrado OK: clic en borrar y se canceló la confirmación, no se borró nada]"
+
+
 def _cerrar_dialogo_abierto(page: Page):
     _click_primero_visible(page, [
         "#btnExitoAceptar_grillaExternosDocumentosTrabajador_2",
         "#btnExitoAceptar_grillaExternosDocumentosTrabajador",
         "#btnBorrarNoExitosoAceptar_2",
         "#btnBorrarNoExitosoAceptar",
-        "#btnConfirmacionBorrarCancelar_2",
-        "#btnConfirmacionBorrarCancelar",
+        *SEL_CONFIRMAR_CANCELAR,
     ])
 
 
@@ -153,10 +177,14 @@ def _ir_a_pagina(page: Page, n: int) -> bool:
 # Deja sin documentación a alguien que ya venía cargado de antes. Solo se
 # pueden tocar los documentos que subió el proveedor: los que puso el mandante
 # ni siquiera tienen botón de borrar. Con borrar=False solo se listan.
+# Con borrar=True y simular=True (modo prueba) se listan y, con el primero,
+# se prueba el clic en "borrar" y se CANCELA la confirmación: nunca se aprieta
+# Aceptar, así que no se borra nada.
 # Se van borrando de a uno, aceptando el aviso de cada uno.
 # Da por hecho que la pantalla de documentos ya está abierta y la deja abierta:
 # quien llama se encarga de llegar hasta ahí y de salir.
-def _limpiar_en_vista_abierta(page: Page, borrar: bool = False) -> tuple[str, list[str]]:
+def _limpiar_en_vista_abierta(page: Page, borrar: bool = False,
+                              simular: bool = False) -> tuple[str, list[str]]:
     # Se para en la primera página donde todavía quede algo por borrar.
     def _pagina_con_borrable():
         for pg_n in range(1, _total_paginas(page) + 1):
@@ -166,12 +194,16 @@ def _limpiar_en_vista_abierta(page: Page, borrar: bool = False) -> tuple[str, li
         return False
 
     # Solo mirar: se recorren todas las páginas y no se borra nada.
-    if not borrar:
+    if not borrar or simular:
         vistos: list[str] = []
         for pg_n in range(1, _total_paginas(page) + 1):
             _ir_a_pagina(page, pg_n)
             vistos.extend(page.evaluate(_JS_LISTAR))
-        return ("listado", vistos)
+        if not borrar:
+            return ("listado", vistos)
+        if vistos:
+            vistos.append(_probar_clic_borrar_y_cancelar(page, _pagina_con_borrable))
+        return ("simulado", vistos)
 
     borrados: list[str] = []
     guarda = 0
@@ -297,6 +329,13 @@ SEL_BTN_CM = "#btnDocumentosMasivos_2"
 SEL_CM_FILE = "#FileDocumentosTrabajadorMasivo"
 SEL_CM_GUARDAR = "#btnGuardarModalCargaMasivaDocumentos_2"
 SEL_CM_CANCELAR = "#btnCancelarModalCargaMasivaDocumentos_2"
+SEL_CM_PANEL = "#panelCargaModalDocumentosMasivo"
+
+# En modo prueba se guarda aquí una imagen del panel de carga ya lleno, justo
+# antes de cancelarlo, para poder revisar después qué tipo quedó en cada
+# archivo. Es relativa a la carpeta desde donde corre el bot (la del
+# programa, cuando se usa la interfaz).
+CARPETA_CAPTURAS = "capturas"
 
 
 # Empareja nombres escritos de cualquier manera: sin tildes, sin importar
@@ -468,7 +507,55 @@ def _guardar_carga_masiva(page: Page) -> bool:
 # El período se deja en blanco, que es como lo hacen a mano; si el sitio lo
 # rechaza, se completa con la fecha de contratación y se reintenta. La fecha
 # de vencimiento en cambio siempre hay que ponerla, el sitio no la perdona.
+# Guarda una imagen del panel de carga masiva tal como quedó lleno. Para que
+# salgan todas las filas y no solo las que caben en pantalla, le quita por un
+# momento el alto máximo y el scroll interno, y después le devuelve los
+# estilos originales: si no, el panel queda más alto que la ventana y el botón
+# Cancelar se sale de la vista y no se puede apretar. Si algo falla, no frena
+# la prueba.
+_JS_EXPANDIR_PANEL = """(sel) => {
+    const panel = document.querySelector(sel);
+    if (!panel) return;
+    for (const el of [panel, ...panel.querySelectorAll('*')]) {
+        if (/(auto|scroll)/.test(getComputedStyle(el).overflowY)) {
+            el.dataset.botEstiloOriginal = el.getAttribute('style') || '';
+            el.style.overflow = 'visible';
+            el.style.maxHeight = 'none';
+            el.style.height = 'auto';
+        }
+    }
+}"""
+
+_JS_RESTAURAR_PANEL = """() => {
+    for (const el of document.querySelectorAll('[data-bot-estilo-original]')) {
+        el.setAttribute('style', el.dataset.botEstiloOriginal);
+        delete el.dataset.botEstiloOriginal;
+    }
+}"""
+
+
+def _capturar_panel_carga(page: Page, ruta: str) -> bool:
+    try:
+        os.makedirs(os.path.dirname(ruta) or ".", exist_ok=True)
+        page.evaluate(_JS_EXPANDIR_PANEL, SEL_CM_PANEL)
+        panel = page.locator(SEL_CM_PANEL).first
+        if panel.count() and panel.is_visible():
+            panel.screenshot(path=ruta)
+        else:
+            page.screenshot(path=ruta, full_page=True)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            page.evaluate(_JS_RESTAURAR_PANEL)
+        except Exception:
+            pass
+
+
 # Con guardar=False se llena todo pero se cancela, para poder mirar sin subir.
+# Si además viene `captura_como`, antes de cancelar se guarda una imagen del
+# panel lleno en esa ruta.
 # Da por hecho que la pantalla ya está abierta y la deja abierta.
 # `tipos_ya_leidos` sirve para no releer la tabla cuando quien llama acaba de
 # leerla: paginarla de nuevo es caro y no habría cambiado nada.
@@ -476,6 +563,7 @@ def _subir_en_vista_abierta(
     page: Page, items, periodo_ddmmaaaa: str, vencimiento_ddmmaaaa: str = "",
     guardar: bool = True, dejar_periodo_vacio: bool = True,
     omitir_existentes: bool = True, tipos_ya_leidos=None,
+    captura_como: Optional[str] = None,
 ):
     if not items:
         return ("sin_items", [], [], [])
@@ -530,6 +618,8 @@ def _subir_en_vista_abierta(
             errores.append(f"{it['nombre']}: el tipo '{it['tipo']}' no está en el combo")
 
     if not guardar:
+        if captura_como and not _capturar_panel_carga(page, captura_como):
+            errores.append("no se pudo guardar la captura del panel")
         try:
             page.locator(SEL_CM_CANCELAR).first.click(timeout=5000)
         except Exception:
@@ -602,7 +692,7 @@ def gestionar_documentos_trabajador(
     # verificar: sirve para no reportar como faltante algo que la persona ya
     # tenía cargado y que simplemente no venía en la carpeta.
     resultado = {"sin_rut": False, "limpieza": None, "tipos": None, "subida": None,
-                 "tipos_sitio": None}
+                 "tipos_sitio": None, "captura": None}
     if not (limpiar or verificar or items):
         return resultado
 
@@ -612,7 +702,10 @@ def gestionar_documentos_trabajador(
 
     try:
         if limpiar:
-            resultado["limpieza"] = _limpiar_en_vista_abierta(page, borrar=(limpiar == "borrar"))
+            # En modo prueba (guardar=False) nunca se borra: se lista y se
+            # prueba el clic en borrar cancelando la confirmación.
+            resultado["limpieza"] = _limpiar_en_vista_abierta(
+                page, borrar=(limpiar == "borrar"), simular=not guardar)
 
         # Se lee una sola vez y se reusa para la subida, que necesita lo mismo.
         tipos = None
@@ -623,10 +716,18 @@ def gestionar_documentos_trabajador(
                 resultado["tipos"] = tipos
 
         if items:
+            # En modo prueba queda una imagen del panel lleno por persona.
+            captura = None
+            if not guardar:
+                captura = os.path.abspath(os.path.join(
+                    CARPETA_CAPTURAS,
+                    f"panel_{normalizar_rut(rut)}_{time.strftime('%Y%m%d_%H%M%S')}.png"))
             resultado["subida"] = _subir_en_vista_abierta(
                 page, items, periodo_ddmmaaaa, vencimiento_ddmmaaaa,
                 guardar=guardar, omitir_existentes=omitir_existentes,
-                tipos_ya_leidos=tipos)
+                tipos_ya_leidos=tipos, captura_como=captura)
+            if captura and os.path.isfile(captura):
+                resultado["captura"] = captura
     finally:
         # Pase lo que pase hay que volver a la lista, o la fila siguiente
         # arranca parada en la pantalla equivocada.

@@ -88,6 +88,53 @@ def quitar_prefijo_catalogo(valor: Optional[str]) -> str:
     return texto
 
 
+# Los grupos proveedor que existen hoy en el combo del sitio. Solo se usan en
+# el chequeo previo para avisar de un tipeo; si aparece un grupo nuevo en el
+# sitio, agregarlo aquí.
+GRUPOS_PROVEEDOR_CONOCIDOS = [
+    "Grupo Colchagua Empresa de Servicios Transitorios S.A.",
+    "Grupo Santa Cruz Outsourcing S.A.",
+]
+
+
+# El RUT sin puntos ni espacios y con la K en mayúscula, que es como se
+# compara ("10.016.891-k" -> "10016891-K").
+def normalizar_rut(rut: Optional[str]) -> str:
+    if es_vacio(rut):
+        return ""
+    return str(rut).replace(".", "").replace(" ", "").strip().upper()
+
+
+# Dígito verificador chileno (módulo 11) para la parte numérica del RUT.
+def digito_verificador(numero: str) -> str:
+    suma, factor = 0, 2
+    for d in reversed(numero):
+        suma += int(d) * factor
+        factor = 2 if factor == 7 else factor + 1
+    resto = 11 - suma % 11
+    return {11: "0", 10: "K"}.get(resto, str(resto))
+
+
+# Revisa que el RUT tenga forma de RUT y que su dígito verificador cuadre.
+# Devuelve el problema en palabras, o "" si está bien.
+def problema_rut(rut: Optional[str]) -> str:
+    if es_vacio(rut):
+        return "RUT vacío"
+    original = str(rut).strip()
+    limpio = normalizar_rut(original)
+    numero, guion, dv = limpio.rpartition("-")
+    if not guion or not numero.isdigit() or not (7 <= len(numero) <= 8) \
+            or len(dv) != 1 or dv not in "0123456789K":
+        return f"RUT '{original}' con formato inválido (se espera 12345678-9)"
+    esperado = digito_verificador(numero)
+    if dv != esperado:
+        return (f"RUT '{original}' con dígito verificador incorrecto "
+                f"(para {numero} corresponde {esperado}): revisar tipeo")
+    if original != limpio:
+        return f"RUT '{original}' con puntos, espacios o k minúscula: escribirlo como {limpio}"
+    return ""
+
+
 # El Excel llega con los encabezados de la planilla original para que el
 # usuario pegue el bloque tal cual. Acá se traducen a los nombres que usa el
 # resto del código.
@@ -196,9 +243,39 @@ def seleccionar_grupo_proveedor(page: Page, nombre_proveedor: str):
     time.sleep(0.5)
 
 
-# Filtra la grilla por RUT y dice si apareció alguien. La espera extra es
-# porque el sitio termina de cargar la página antes de terminar de dibujar la
-# fila, y sin eso se daba por no encontrada a gente que sí existe.
+# El RUT aparece en la grilla, pero también aparece como parte de otro RUT
+# (p. ej. se busca 1234567-8 y la grilla muestra 11234567-8). Editar o abrir
+# la primera fila en ese caso podría tocar a otra persona, así que la fila se
+# reporta como ERROR en vez de adivinar.
+class RutAmbiguoEnGrilla(Exception):
+    pass
+
+
+# Cuenta las celdas de la grilla cuyo texto es el RUT buscado (exactas) y las
+# que lo contienen (parciales, incluye las exactas). Se comparan sin puntos,
+# sin espacios y en mayúsculas, así "10.016.891-k" y "10016891-K" son iguales.
+# Solo se miran celdas sin otra tabla adentro, para no contar dos veces.
+_JS_CONTAR_RUT_EN_GRILLA = """([tabla, rut]) => {
+    const norm = s => (s || '').replace(/[.\\s]/g, '').toUpperCase();
+    const t = document.querySelector(tabla);
+    if (!t) return {exactas: 0, parciales: 0};
+    const objetivo = norm(rut);
+    let exactas = 0, parciales = 0;
+    for (const td of t.querySelectorAll('td')) {
+        if (td.querySelector('td')) continue;
+        const texto = norm(td.textContent);
+        if (!texto.includes(objetivo)) continue;
+        parciales++;
+        if (texto === objetivo) exactas++;
+    }
+    return {exactas, parciales};
+}"""
+
+
+# Filtra la grilla por RUT y dice si apareció la persona. Exige que una celda
+# sea exactamente el RUT: antes bastaba con que lo contuviera. La espera extra
+# es porque el sitio termina de cargar la página antes de terminar de dibujar
+# la fila, y sin eso se daba por no encontrada a gente que sí existe.
 def buscar_rut(page: Page, rut: str) -> bool:
     filtro = page.locator(SELECTOR_FILTRO_RUT)
     filtro.click()
@@ -206,14 +283,33 @@ def buscar_rut(page: Page, rut: str) -> bool:
     filtro.fill(rut)
     filtro.press("Enter")
     page.wait_for_load_state("networkidle")
-    selector_resultado = f"{SELECTOR_TABLA_GRILLA} td:has-text('{rut}')"
     try:
-        page.wait_for_selector(selector_resultado, timeout=5000)
+        page.wait_for_function(
+            f"(args) => ({_JS_CONTAR_RUT_EN_GRILLA})(args).parciales > 0",
+            arg=[SELECTOR_TABLA_GRILLA, rut], timeout=5000,
+        )
     except Exception:
         pass
     time.sleep(0.3)
 
-    return page.locator(selector_resultado).count() > 0
+    conteo = page.evaluate(_JS_CONTAR_RUT_EN_GRILLA, [SELECTOR_TABLA_GRILLA, rut])
+    return interpretar_conteo_rut(rut, conteo["exactas"], conteo["parciales"])
+
+
+# Decide con los conteos de la grilla si la persona está (True), no está
+# (False) o si no se puede saber sin riesgo de tocar a otra (excepción).
+def interpretar_conteo_rut(rut: str, exactas: int, parciales: int) -> bool:
+    if parciales == 0:
+        return False
+    if exactas == 0:
+        raise RutAmbiguoEnGrilla(
+            f"el RUT {rut} no aparece exacto en la grilla, solo como parte de otro RUT; "
+            "no se tocó nada. Verificar el RUT en el Excel y en ShiftLaboral")
+    if parciales > exactas:
+        raise RutAmbiguoEnGrilla(
+            f"la grilla muestra el RUT {rut} y además otro RUT que lo contiene; no se "
+            "tocó nada para no modificar a otra persona. Revisar en ShiftLaboral")
+    return True
 
 
 # Deja la grilla sin filtro para la búsqueda siguiente.
@@ -229,8 +325,9 @@ def limpiar_filtro(page: Page):
 # Arma el Excel final, una fila por persona y con el color según cómo salió.
 # Sirve para las dos fases: solo pide objetos con rut, nombre, estado y
 # detalle. Si el archivo está abierto en Excel, guarda con otro nombre en vez
-# de perder el trabajo de toda la corrida.
-def escribir_reporte(resultados: list, output_path: str, colores_estado: dict):
+# de perder el trabajo de toda la corrida. Devuelve la ruta en que quedó.
+def escribir_reporte(resultados: list, output_path: str, colores_estado: dict,
+                     etiqueta: str = "Reporte") -> str:
     wb = Workbook()
     ws = wb.active
     ws.title = "Reporte"
@@ -261,4 +358,5 @@ def escribir_reporte(resultados: list, output_path: str, colores_estado: dict):
         wb.save(alterno)
         output_path = alterno
 
-    print(f"\nReporte guardado en: {output_path}")
+    print(f"\n{etiqueta} guardado en: {output_path}")
+    return output_path

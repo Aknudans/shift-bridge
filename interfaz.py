@@ -100,6 +100,14 @@ AYUDA = [
         "qué carpetas no calzan con nadie, qué archivos no se reconocen, cuáles "
         "están en subcarpetas (esos no se leen) y qué celdas obligatorias del Excel "
         "vienen vacías o con una AFP o Sistema de Salud que no existe.",
+        "También revisa el Excel: RUT con formato inválido, con dígito verificador "
+        "incorrecto o repetido en más de una fila, Sexo distinto de M/F y Proveedor "
+        "que no es uno de los dos grupos conocidos.",
+        "Al apretar Iniciar (en creación/edición y en subir documentos) el chequeo "
+        "corre solo. Si encuentra problemas, avisa, deja un Excel con el detalle "
+        "junto al reporte (mismo nombre terminado en «_chequeo») y pregunta si se "
+        "quiere continuar de todos modos. Si se responde que no, no se abre el "
+        "sitio ni se modifica nada.",
         "Si un archivo no se reconoce, se omite ese archivo solo y queda avisado en "
         "el reporte; los demás se suben igual. Lo mismo si a alguien le falta algún "
         "documento del set habitual: no frena nada, solo queda la advertencia.",
@@ -112,9 +120,13 @@ AYUDA = [
         "Documentos anteriores: qué hacer con los documentos que el proveedor le "
         "subió antes a alguien que ya existía. «Solo anotarlos» los lista sin "
         "tocarlos; «Borrarlos» los elimina de verdad.",
-        "⚠ El modo prueba NO protege el borrado de documentos. Si se elige "
-        "«Borrarlos», se borran igual y no se pueden recuperar. Los documentos "
-        "cargados por el mandante nunca se tocan.",
+        "En modo prueba no se borra nada aunque se elija «Borrarlos»: se anotan "
+        "los documentos que se borrarían y, con el primero, se prueba el botón "
+        "borrar y se cancela la confirmación. Además se guarda en la carpeta "
+        "«capturas» una imagen del panel de carga lleno de cada persona.",
+        "⚠ Fuera del modo prueba, «Borrarlos» elimina los documentos de verdad y "
+        "no se pueden recuperar. Los documentos cargados por el mandante nunca se "
+        "tocan.",
     ]),
     ("Mientras corre", [
         "El recuadro de abajo va mostrando en qué persona está y qué le hizo. La "
@@ -129,6 +141,13 @@ AYUDA = [
         "Se guarda donde diga «Reporte de salida», con una fila por persona y un "
         "color según cómo salió: verde si se hizo, amarillo si se omitió, rojo si "
         "hubo error.",
+        "El nombre propuesto lleva la fecha y la hora (p. ej. "
+        "«reporte_crear_20260922_153012.xlsx») y se renueva al apretar Iniciar, así "
+        "cada corrida deja su propio archivo. Si se elige otro nombre a mano, se "
+        "respeta.",
+        "Si un RUT aparece en la grilla solo como parte de otro RUT (p. ej. se busca "
+        "1234567-8 y aparece 11234567-8), esa persona se marca como ERROR y no se "
+        "toca, para no modificar a otra.",
         "La columna de detalle explica qué pasó en cada caso: qué campos cambiaron, "
         "qué documentos se subieron, qué faltó.",
         "Si el archivo del reporte está abierto en Excel, se guarda con otro nombre "
@@ -163,6 +182,10 @@ LIMPIAR_BORRAR = "Borrarlos (no se puede deshacer)"
 
 RE_PROGRESO = re.compile(r"^\[(\d+)/(\d+)\]")
 RE_RESUMEN = re.compile(r"^Resumen:")
+# Las dos líneas del chequeo previo que la interfaz necesita leer: cuántas
+# personas tienen problemas y dónde quedó el Excel con el detalle.
+RE_RESUMEN_CHEQUEO = re.compile(r"^Resumen chequeo: (\d+) persona")
+RE_REPORTE_CHEQUEO = re.compile(r"^Reporte del chequeo previo guardado en: (.+)$")
 
 ctk.set_appearance_mode("system")
 ctk.set_default_color_theme("blue")
@@ -203,6 +226,13 @@ class InterfazBot(ctk.CTk):
         self.hubo_errores = False   # alguna línea del log con ERROR o Traceback
         self.log_ampliado = False
         self.nombre_corrida = "log"
+        # Qué se está corriendo: "revision" (botón Revisar), "chequeo_previo"
+        # (el chequeo que va antes de Iniciar) o "ejecucion". Tras el chequeo
+        # previo, `comando_pendiente` es la corrida que se lanza si se sigue.
+        self.fase = "ejecucion"
+        self.comando_pendiente = None
+        self.chequeo_problemas = 0
+        self.chequeo_reporte = None
 
         self._construir_widgets()
         self._actualizar_visibilidad_modo()
@@ -266,7 +296,8 @@ class InterfazBot(ctk.CTk):
         self.entry_salida = self._fila_archivo(
             marco_archivos, "Reporte de salida:", self._elegir_salida
         )
-        self.entry_salida.insert(0, os.path.join(BASE_DIR, "reporte.xlsx"))
+        self.salida_sugerida = ""
+        self._sugerir_nombre_reporte()
 
         self.fila_carpeta_docs = ctk.CTkFrame(marco_archivos, fg_color="transparent")
         self.entry_carpeta_docs = self._fila_archivo(
@@ -442,17 +473,20 @@ class InterfazBot(ctk.CTk):
             self.check_verificar_docs.configure(state="normal")
             self.fila_limpiar.pack(fill="x", padx=10, pady=(4, 8))
 
-        # Se sugiere un nombre de reporte según el modo, pero sin pisar el
-        # que la persona haya escrito a mano.
+        self._sugerir_nombre_reporte()
+
+    # Propone un nombre de reporte con el modo, la fecha y la hora, para que
+    # cada corrida deje su propio archivo y no se pise el anterior. No toca un
+    # nombre que la persona haya escrito o elegido a mano.
+    def _sugerir_nombre_reporte(self):
         actual = self.entry_salida.get().strip()
-        defaults = {
-            os.path.join(BASE_DIR, "reporte.xlsx"),
-            os.path.join(BASE_DIR, "reporte_crear.xlsx"),
-        }
-        if actual in defaults or actual == "":
-            nuevo = "reporte.xlsx" if modo == "comparar" else "reporte_crear.xlsx"
-            self.entry_salida.delete(0, "end")
-            self.entry_salida.insert(0, os.path.join(BASE_DIR, nuevo))
+        if actual and actual != self.salida_sugerida:
+            return
+        prefijo = "reporte" if self.modo.get() == "comparar" else "reporte_crear"
+        self.salida_sugerida = os.path.join(
+            BASE_DIR, f"{prefijo}_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+        self.entry_salida.delete(0, "end")
+        self.entry_salida.insert(0, self.salida_sugerida)
 
     # Los tres botones de "Elegir...".
 
@@ -579,11 +613,17 @@ class InterfazBot(ctk.CTk):
         if error:
             messagebox.showwarning("Falta información", error)
             return
+        self._lanzar(self._comando_chequeo(), texto_boton="Revisando...", fase="revision")
+
+    # La orden del chequeo previo (sin abrir Chrome). Lleva el mismo --output
+    # que la corrida, para que su reporte quede al lado con "_chequeo".
+    def _comando_chequeo(self) -> list[str]:
         comando = self._comando_base_modo("--modo-crear") + [
-            "--input", self.entry_excel.get().strip(), "--solo-chequear"]
+            "--input", self.entry_excel.get().strip(),
+            "--output", self.entry_salida.get().strip(), "--solo-chequear"]
         if self.modo.get() == "documentos":
             comando += ["--subir-documentos", self.entry_carpeta_docs.get().strip()]
-        self._lanzar(comando, texto_boton="Revisando...")
+        return comando
 
     def _iniciar(self):
         if self.proceso is not None:
@@ -594,9 +634,14 @@ class InterfazBot(ctk.CTk):
             messagebox.showwarning("Falta información", error)
             return
 
+        # Si el nombre del reporte es el sugerido, se renueva la hora: dos
+        # corridas seguidas no deben escribir en el mismo archivo.
+        self._sugerir_nombre_reporte()
+
         # Borrar documentos no se puede deshacer, así que se pregunta de nuevo
         # aunque ya esté elegido en el menú.
-        if self.var_limpiar_docs.get() == LIMPIAR_BORRAR:
+        # En modo prueba no se borra nada, así que no hace falta preguntar.
+        if self.var_limpiar_docs.get() == LIMPIAR_BORRAR and not self.var_no_guardar.get():
             confirmar = messagebox.askyesno(
                 "Borrar documentos anteriores",
                 "A cada persona que YA EXISTÍA en ShiftLaboral se le van a BORRAR "
@@ -609,9 +654,19 @@ class InterfazBot(ctk.CTk):
             if not confirmar:
                 return
 
-        self._lanzar(self._armar_comando(), texto_boton="Corriendo...")
+        # La comparación solo lee, así que va directo. Crear/editar y subir
+        # documentos pasan antes por el chequeo previo: si encuentra problemas,
+        # se avisa y se pregunta si seguir (ver _al_terminar_chequeo).
+        if self.modo.get() == "comparar":
+            self._lanzar(self._armar_comando(), texto_boton="Corriendo...")
+            return
+        self.comando_pendiente = self._armar_comando()
+        self._lanzar(self._comando_chequeo(), texto_boton="Revisando...", fase="chequeo_previo")
 
-    def _lanzar(self, comando: list[str], texto_boton: str):
+    def _lanzar(self, comando: list[str], texto_boton: str, fase: str = "ejecucion"):
+        self.fase = fase
+        self.chequeo_problemas = 0
+        self.chequeo_reporte = None
         self.total_filas = None
         self.cancelado_por_usuario = False
         self.hubo_errores = False
@@ -688,16 +743,23 @@ class InterfazBot(ctk.CTk):
                 errors="replace",
                 bufsize=1,
                 creationflags=CREATIONFLAGS,
+                # Sin entrada: el bot no debe quedarse esperando una respuesta
+                # por consola (las preguntas se hacen en esta ventana).
+                stdin=subprocess.DEVNULL,
             )
             for linea in self.proceso.stdout:
                 self.cola_salida.put(linea.rstrip("\n"))
             self.proceso.wait()
-            self.cola_salida.put(f"__FIN__{self.proceso.returncode}")
+            codigo = self.proceso.returncode
+            # Se suelta el proceso antes de avisar el fin: al terminar el
+            # chequeo previo se lanza enseguida la corrida, y no debe
+            # borrarse la referencia a ese proceso nuevo.
+            self.proceso = None
+            self.cola_salida.put(f"__FIN__{codigo}")
         except Exception as e:
+            self.proceso = None
             self.cola_salida.put(f"ERROR al ejecutar el proceso: {e}")
             self.cola_salida.put("__FIN__1")
-        finally:
-            self.proceso = None
 
     # Cada décima de segundo saca lo que haya en la cola y lo muestra. De las
     # líneas del tipo "[3/20]" sale el avance de la barra, y de la del resumen
@@ -730,6 +792,13 @@ class InterfazBot(ctk.CTk):
         if RE_RESUMEN.match(linea):
             self.label_progreso.configure(text=linea.replace("Resumen: ", ""))
 
+        m = RE_RESUMEN_CHEQUEO.match(linea)
+        if m:
+            self.chequeo_problemas = int(m.group(1))
+        m = RE_REPORTE_CHEQUEO.match(linea)
+        if m:
+            self.chequeo_reporte = m.group(1).strip()
+
     # Deja los botones como estaban y avisa cómo terminó la cosa.
     def _al_terminar(self, codigo: str):
         self.boton_iniciar.configure(state="normal", text="Iniciar")
@@ -747,6 +816,9 @@ class InterfazBot(ctk.CTk):
                 icon="warning",
             ):
                 self._descargar_log()
+            return
+        if self.fase in ("chequeo_previo", "revision") and codigo == "0":
+            self._al_terminar_chequeo()
             return
         if self.total_filas:
             self.barra_progreso.set(1)
@@ -768,6 +840,56 @@ class InterfazBot(ctk.CTk):
             icon="warning",
         ):
             self._descargar_log()
+
+    # Qué hacer cuando termina un chequeo: con el botón Revisar solo se avisa;
+    # antes de Iniciar, si hubo problemas se pregunta si seguir, y si no hubo
+    # se lanza la corrida directamente.
+    def _al_terminar_chequeo(self):
+        problemas = self.chequeo_problemas
+        reporte = self.chequeo_reporte
+        if self.fase == "chequeo_previo" and not problemas:
+            self._lanzar(self.comando_pendiente, texto_boton="Corriendo...")
+            return
+
+        if not problemas:
+            self._log("\n=== Chequeo terminado: no se encontraron problemas. ===")
+            return
+
+        texto_reporte = (f"Se creó un reporte con el detalle de cada problema:\n{reporte}"
+                         if reporte else "El detalle está en el log de la ventana principal.")
+        encabezado = (f"El chequeo previo detectó {problemas} persona(s) con problemas "
+                      "(datos del Excel, carpetas o archivos).\n\n" + texto_reporte)
+
+        if self.fase == "revision":
+            self._log(f"\n=== Chequeo terminado: {problemas} persona(s) con problemas. ===")
+            if not reporte:
+                messagebox.showwarning("Problemas detectados", encabezado)
+            elif messagebox.askyesno("Problemas detectados",
+                                     encabezado + "\n\n¿Abrir el reporte ahora?", icon="warning"):
+                self._abrir_archivo(reporte)
+            return
+
+        # Chequeo antes de Iniciar: la persona decide si seguir igual.
+        seguir = messagebox.askyesno(
+            "Problemas detectados",
+            encabezado + "\n\nLas filas con problemas pueden terminar en ERROR u omitidas; "
+            "el resto se procesa normalmente.\n\n¿Desea continuar con la ejecución de todos "
+            "modos?",
+            icon="warning",
+        )
+        if seguir:
+            self._lanzar(self.comando_pendiente, texto_boton="Corriendo...")
+            return
+        self._log("\n=== Ejecución NO iniciada: se detuvo tras el chequeo previo. "
+                  "No se abrió el sitio ni se modificó nada. ===")
+        if reporte and messagebox.askyesno("Ejecución no iniciada", "¿Abrir el reporte del chequeo?"):
+            self._abrir_archivo(reporte)
+
+    def _abrir_archivo(self, ruta: str):
+        try:
+            os.startfile(ruta)
+        except Exception as e:
+            messagebox.showerror("Abrir archivo", f"No se pudo abrir:\n{ruta}\n\n{e}")
 
     # Escribir y limpiar el recuadro del log.
 

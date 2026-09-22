@@ -24,9 +24,13 @@ from shift_common import (
     conectar_a_chrome_existente,
     escribir_reporte,
     limpiar_filtro,
+    GRUPOS_PROVEEDOR_CONOCIDOS,
     navegar_a_trabajadores_por_menu,
+    normalizar_rut,
     normalizar_texto,
+    problema_rut,
     quitar_prefijo_catalogo,
+    RutAmbiguoEnGrilla,
     seleccionar_grupo_proveedor,
 )
 from campos_formulario import (
@@ -156,16 +160,43 @@ def _carpeta_sugerida(nombre, ap_pat) -> str:
     return "_".join(_norm_texto(p).capitalize() for p in partes if p)
 
 
-# Revisa el Excel antes de abrir Chrome: celdas obligatorias vacías y AFP o
-# Sistema de Salud que no están en el catálogo conocido. Son las causas de los
-# errores "Timeout ... text=nan" / "text=Sin AFP" de corridas anteriores.
+# Revisa el Excel antes de abrir Chrome: RUT mal escrito (formato, dígito
+# verificador) o repetido, Sexo o Proveedor que no se reconocen, celdas
+# obligatorias vacías y AFP o Sistema de Salud fuera del catálogo conocido.
+# Estas últimas son las causas de los errores "Timeout ... text=nan" /
+# "text=Sin AFP" de corridas anteriores.
 # Devuelve una lista (rut, nombre, [problemas]) solo con las filas con algo.
 def chequear_datos_excel(df: pd.DataFrame) -> list:
     afp_ok = {normalizar_texto(v) for v in CATALOGO_AFP}
     salud_ok = {normalizar_texto(v) for v in CATALOGO_SALUD}
+    grupos_ok = {normalizar_texto(g) for g in GRUPOS_PROVEEDOR_CONOCIDOS}
+
+    # Filas del Excel (numeradas como en Excel: la 1 es el encabezado) en que
+    # aparece cada RUT, para avisar si alguien viene repetido.
+    filas_por_rut: dict[str, list[int]] = {}
+    for n, (_, f) in enumerate(df.iterrows(), start=2):
+        clave = normalizar_rut(f["RUT"])
+        if clave:
+            filas_por_rut.setdefault(clave, []).append(n)
+
     hallazgos = []
     for _, f in df.iterrows():
         problemas = []
+        motivo_rut = problema_rut(f["RUT"])
+        if motivo_rut:
+            problemas.append(motivo_rut)
+        filas = filas_por_rut.get(normalizar_rut(f["RUT"]), [])
+        if len(filas) > 1:
+            problemas.append("RUT repetido en las filas "
+                             + ", ".join(str(x) for x in filas)
+                             + " del Excel: se procesaría más de una vez")
+        if not _vacio(f.get("SEXO")) and f["SEXO"] not in ("Masculino", "Femenino"):
+            problemas.append(f"Sexo '{f['SEXO']}' no reconocido (usar M, F, Masculino o Femenino)")
+        if not _vacio(f.get("PROVEEDOR")):
+            grupo = normalizar_texto(str(f["PROVEEDOR"]).split("/")[-1])
+            if grupo not in grupos_ok:
+                problemas.append(f"Proveedor '{f['PROVEEDOR']}' no es uno de los grupos "
+                                 f"conocidos ({'; '.join(GRUPOS_PROVEEDOR_CONOCIDOS)})")
         for col, etiqueta in COLUMNAS_OBLIGATORIAS_CHEQUEO:
             if col in f and _vacio(f[col]):
                 problemas.append(f"'{etiqueta}' vacío")
@@ -279,6 +310,53 @@ def imprimir_chequeo_previo(datos: list, carpeta: Optional[tuple], base: Optiona
     return len(con_problemas)
 
 
+# Lo mismo que imprime el chequeo previo, pero como filas para un Excel: una
+# por problema. ERROR es lo que cuenta como "persona con algo que revisar"
+# (lo mismo que suma imprimir_chequeo_previo); ADVERTENCIA es informativo.
+def filas_reporte_chequeo(datos: list, carpeta: Optional[tuple]) -> list:
+    filas = [ResultadoFila(rut, nombre, "ERROR", "Datos del Excel: " + "; ".join(problemas))
+             for rut, nombre, problemas in datos]
+    if carpeta is None:
+        return filas
+    por_persona, sin_dueno, _ = carpeta
+    for p in por_persona:
+        if not p["carpeta"]:
+            filas.append(ResultadoFila(
+                p["rut"], p["nombre"], "ERROR",
+                f"Sin carpeta de documentos: {p['motivo']}. Nombre sugerido: '{p['sugerida']}'"))
+            continue
+        if p["omitidos"]:
+            filas.append(ResultadoFila(p["rut"], p["nombre"], "ERROR",
+                                       "Archivos no reconocidos: " + "; ".join(p["omitidos"])))
+        if p["en_subcarpetas"]:
+            filas.append(ResultadoFila(p["rut"], p["nombre"], "ERROR",
+                                       "Archivos en subcarpetas (no se leen): "
+                                       + ", ".join(p["en_subcarpetas"])))
+        if p["repetidos"]:
+            filas.append(ResultadoFila(p["rut"], p["nombre"], "ADVERTENCIA",
+                                       "Tipo repetido (se suben todos): " + ", ".join(p["repetidos"])))
+        if p["faltan"]:
+            filas.append(ResultadoFila(p["rut"], p["nombre"], "ADVERTENCIA",
+                                       "Faltan del set estándar (puede que ya estén cargados "
+                                       "en el sitio): " + ", ".join(p["faltan"])))
+    for d in sin_dueno:
+        filas.append(ResultadoFila("", f"(carpeta) {d}", "ADVERTENCIA",
+                                   "La carpeta no calza con nadie de la planilla: revisar tipeos "
+                                   "o palabras de más (RUT, 'docs', '(1)')"))
+    return filas
+
+
+COLORES_CHEQUEO = {"ERROR": "FFC7CE", "ADVERTENCIA": "FFEB9C"}
+
+
+# Dónde queda el reporte del chequeo si no se indica: junto al reporte de la
+# corrida, con "_chequeo" al final ("reporte_crear_2026....xlsx" ->
+# "reporte_crear_2026..._chequeo.xlsx").
+def ruta_reporte_chequeo(output: str) -> str:
+    base, _ext = os.path.splitext(output)
+    return base + "_chequeo.xlsx"
+
+
 # Las cajas de texto del formulario. Por suerte se llaman igual al crear que
 # al editar, así que el mismo código sirve para los dos casos.
 CAMPOS_TEXTO = {
@@ -367,8 +445,12 @@ def _notas_documentos(docs: dict, omitidos: list) -> tuple[list[str], bool]:
 
     if docs["limpieza"]:
         accion, lista = docs["limpieza"]
-        verbo = "Docs borrables" if accion == "listado" else "Docs BORRADOS"
-        notas.append(f"{verbo} ({len(lista)}): " + (" ; ".join(lista) if lista else "ninguno"))
+        verbo = {"listado": "Docs borrables",
+                 "simulado": "Docs que se BORRARÍAN (modo prueba, no se borró nada)",
+                 }.get(accion, "Docs BORRADOS")
+        # Las líneas entre corchetes son avisos del proceso, no documentos.
+        cantidad = sum(1 for x in lista if not x.startswith("["))
+        notas.append(f"{verbo} ({cantidad}): " + (" ; ".join(lista) if lista else "ninguno"))
 
     if docs["tipos"] is not None:
         tipos = docs["tipos"]
@@ -390,6 +472,8 @@ def _notas_documentos(docs: dict, omitidos: list) -> tuple[list[str], bool]:
             nota += f" | omitidos: {'; '.join(omitidos)}"
         if errs:
             nota += f" | errores: {'; '.join(errs)}"
+        if docs.get("captura"):
+            nota += f" | captura del panel: {docs['captura']}"
 
         # Si falta alguno de los documentos habituales no se frena nada, solo
         # queda la advertencia en el reporte. Lo que la persona ya tenía
@@ -760,6 +844,9 @@ def main(argv=None):
                         help="Revisa el Excel (y la carpeta de --subir-documentos, si se indica) "
                              "sin abrir Chrome ni tocar el sitio, muestra lo que habría que "
                              "corregir y termina.")
+    parser.add_argument("--reporte-chequeo", default=None,
+                        help="Excel donde se guardan los problemas del chequeo previo, si los "
+                             "hay (por defecto, el de --output con '_chequeo' al final).")
     args = parser.parse_args(argv)
 
     global NO_GUARDAR, LIMPIAR_DOCUMENTOS, SUBIR_DOCUMENTOS, VERIFICAR_DOCUMENTOS
@@ -772,6 +859,10 @@ def main(argv=None):
     if LIMPIAR_DOCUMENTOS == "listar":
         print(">>> --limpiar-documentos=listar: se LISTAN los documentos borrables de cada persona "
               "preexistente, NO se borra nada.\n")
+    elif LIMPIAR_DOCUMENTOS == "borrar" and NO_GUARDAR:
+        print(">>> --limpiar-documentos=borrar en MODO PRUEBA: NO se borra nada. Se listan los "
+              "documentos que se borrarían y se prueba el clic en borrar cancelando la "
+              "confirmación.\n")
     elif LIMPIAR_DOCUMENTOS == "borrar":
         print(">>> --limpiar-documentos=borrar: se BORRARÁN (irreversible) los documentos borrables "
               "de cada persona preexistente tras editar sus datos.\n")
@@ -791,14 +882,28 @@ def main(argv=None):
     df = autocompletar_campos_negocio(df)
     print(f"Cargados {len(df)} colaboradores desde {args.input}\n")
 
-    # El chequeo previo corre siempre antes de tocar el sitio: no frena la
-    # corrida, pero deja a la vista lo que va a fallar. Con --solo-chequear
-    # se termina acá.
+    # El chequeo previo corre siempre antes de tocar el sitio y deja a la vista
+    # lo que va a fallar. Si encuentra algo, lo deja además en un Excel. Con
+    # --solo-chequear se termina acá (la interfaz lee el resumen y pregunta si
+    # seguir); por consola, se pregunta aquí mismo.
     chequeo_carpeta = (chequear_carpeta_documentos(df, SUBIR_DOCUMENTOS)
                        if SUBIR_DOCUMENTOS else None)
-    imprimir_chequeo_previo(chequear_datos_excel(df), chequeo_carpeta, SUBIR_DOCUMENTOS)
+    datos_chequeo = chequear_datos_excel(df)
+    con_problemas = imprimir_chequeo_previo(datos_chequeo, chequeo_carpeta, SUBIR_DOCUMENTOS)
+    filas_chequeo = filas_reporte_chequeo(datos_chequeo, chequeo_carpeta)
+    if filas_chequeo:
+        escribir_reporte(filas_chequeo, args.reporte_chequeo or ruta_reporte_chequeo(args.output),
+                         COLORES_CHEQUEO, etiqueta="Reporte del chequeo previo")
     if args.solo_chequear:
         return 0
+    # Solo se pregunta si hay alguien escribiendo en una consola: desde la
+    # interfaz (sin consola) se pregunta allá, antes de lanzar esta corrida.
+    if con_problemas and sys.stdin is not None and sys.stdin.isatty():
+        respuesta = input(f"El chequeo previo encontró {con_problemas} persona(s) con problemas. "
+                          "¿Continuar de todos modos? (s/N): ").strip().lower()
+        if respuesta not in ("s", "si", "sí"):
+            print("Ejecución cancelada: no se abrió el sitio ni se modificó nada.")
+            return 0
 
     playwright, browser, page = conectar_a_chrome_existente()
     asegurar_pagina_trabajadores(page)
@@ -919,6 +1024,8 @@ def main(argv=None):
         except Exception as e:
             if isinstance(e, CampoNoCompletado):
                 detalle = f"No se pudo completar el formulario: {e}"
+            elif isinstance(e, RutAmbiguoEnGrilla):
+                detalle = str(e)
             else:
                 detalle = f"Error inesperado durante el procesamiento: {e}"
             resultados.append(ResultadoFila(rut=rut, nombre_excel=nombre_completo,

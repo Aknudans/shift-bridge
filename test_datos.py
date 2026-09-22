@@ -15,9 +15,14 @@ import tempfile
 import pandas as pd
 
 from shift_common import (
+    RutAmbiguoEnGrilla,
+    digito_verificador,
     formatear_nombre_propio,
+    interpretar_conteo_rut,
+    normalizar_rut,
     normalizar_sexo,
     normalizar_texto,
+    problema_rut,
     quitar_prefijo_catalogo,
 )
 from crear_o_editar import (
@@ -80,22 +85,99 @@ def test_formatear_nombre_propio():
 
 # El chequeo previo detecta en el Excel lo que después termina en un timeout
 # del sitio: celdas obligatorias vacías y AFP/Salud fuera del catálogo.
+_FILA_OK = dict(RUT="11111111-1", NOMBRES="Ana", apellidoPaterno="Rojas", SEXO="Femenino",
+                AFP="Provida", ISAPRE="Fonasa", CARGO="X",
+                PROVEEDOR="LOGISTICA FALABELLA/Grupo Santa Cruz Outsourcing S.A.",
+                TIENDA="Z", fechaContratacion="2026-09-01")
+
+
 def test_chequear_datos_excel():
-    base = dict(RUT="1-9", NOMBRES="Ana", apellidoPaterno="Rojas", SEXO="Femenino",
-                AFP="Provida", ISAPRE="Fonasa", CARGO="X", PROVEEDOR="Y", TIENDA="Z",
-                fechaContratacion="2026-09-01")
+    base = _FILA_OK
     df = pd.DataFrame([
         base,
-        dict(base, RUT="2-7", AFP="Sin AFP"),
-        dict(base, RUT="3-5", AFP=float("nan"), ISAPRE="banmedica"),
-        dict(base, RUT="4-3", SEXO=""),
+        dict(base, RUT="12345678-5", AFP="Sin AFP"),
+        dict(base, RUT="7654321-6", AFP=float("nan"), ISAPRE="banmedica"),
+        dict(base, RUT="5126663-3", SEXO=""),
     ])
     hallazgos = {rut: probs for rut, _, probs in chequear_datos_excel(df)}
-    assert "1-9" not in hallazgos
-    assert any("Sin AFP" in p for p in hallazgos["2-7"])
+    assert "11111111-1" not in hallazgos
+    assert any("Sin AFP" in p for p in hallazgos["12345678-5"])
     # "banmedica" sin tilde es válido; la AFP vacía no.
-    assert hallazgos["3-5"] == ["'AFP' vacío"]
-    assert hallazgos["4-3"] == ["'Sexo' vacío"]
+    assert hallazgos["7654321-6"] == ["'AFP' vacío"]
+    assert hallazgos["5126663-3"] == ["'Sexo' vacío"]
+
+
+# RUT mal escrito o repetido, Sexo no reconocido y Proveedor desconocido
+# aparecen en el chequeo previo, antes de abrir el sitio.
+def test_chequear_datos_excel_rut_sexo_proveedor():
+    df = pd.DataFrame([
+        dict(_FILA_OK, RUT="10016891-5"),                 # dígito verificador malo
+        dict(_FILA_OK, RUT="22710691-3"),
+        dict(_FILA_OK, RUT="22.710.691-3"),               # el mismo, con puntos
+        dict(_FILA_OK, RUT="22708167-8", SEXO="Hombre"),
+        dict(_FILA_OK, RUT="11847694-8", PROVEEDOR="Grupo Colchagua"),
+        dict(_FILA_OK, RUT="12345678-5",                  # el grupo, sin tildes/mayúsculas
+             PROVEEDOR="grupo colchagua empresa de servicios transitorios s.a."),
+    ])
+    hallazgos = {rut: probs for rut, _, probs in chequear_datos_excel(df)}
+    assert any("dígito verificador" in p for p in hallazgos["10016891-5"])
+    assert any("repetido en las filas 3, 4" in p for p in hallazgos["22710691-3"])
+    assert any("repetido" in p for p in hallazgos["22.710.691-3"])
+    assert any("con puntos" in p for p in hallazgos["22.710.691-3"])
+    assert hallazgos["22708167-8"] == ["Sexo 'Hombre' no reconocido (usar M, F, Masculino o Femenino)"]
+    assert any("no es uno de los grupos conocidos" in p for p in hallazgos["11847694-8"])
+    assert "12345678-5" not in hallazgos
+
+
+# El reporte del chequeo: una fila por problema, ERROR lo que cuenta como
+# persona con problemas y ADVERTENCIA lo informativo; queda junto al reporte.
+def test_filas_reporte_chequeo():
+    from crear_o_editar import filas_reporte_chequeo, ruta_reporte_chequeo
+    datos = [("11111111-1", "Ana Rojas", ["RUT repetido", "Sexo 'Hombre' no reconocido"])]
+    por_persona = [
+        {"rut": "22710691-3", "nombre": "Pablo Alfaro", "carpeta": None, "motivo": "sin carpeta",
+         "sugerida": "Pablo_Alfaro", "omitidos": [], "en_subcarpetas": [], "repetidos": [],
+         "faltan": []},
+        {"rut": "12345678-5", "nombre": "Juan Soto", "carpeta": "Juan_Soto", "motivo": "",
+         "sugerida": "Juan_Soto", "omitidos": ["scan.pdf (no calza)"], "en_subcarpetas": [],
+         "repetidos": [], "faltan": ["RIOHS"]},
+    ]
+    filas = filas_reporte_chequeo(datos, (por_persona, ["Carpeta_Rara"], None))
+    estados = [(f.rut, f.estado) for f in filas]
+    assert estados == [("11111111-1", "ERROR"), ("22710691-3", "ERROR"), ("12345678-5", "ERROR"),
+                       ("12345678-5", "ADVERTENCIA"), ("", "ADVERTENCIA")]
+    assert "Pablo_Alfaro" in filas[1].detalle
+    assert filas_reporte_chequeo([], None) == []
+    assert ruta_reporte_chequeo(r"C:\x\reporte_crear_20260922.xlsx") == r"C:\x\reporte_crear_20260922_chequeo.xlsx"
+
+
+# Dígito verificador y forma del RUT, con los RUT reales de CLAUDE.md.
+def test_problema_rut():
+    for rut in ("10016891-K", "22710691-3", "22708167-8", "11847694-8"):
+        assert problema_rut(rut) == "", rut
+    assert digito_verificador("10016891") == "K"
+    assert normalizar_rut("10.016.891-k") == "10016891-K"
+    assert "k minúscula" in problema_rut("10016891-k")
+    assert "dígito verificador" in problema_rut("10016891-5")
+    for malo in ("10016891K", "abc", "1-9", "123456789-0"):
+        assert "formato inválido" in problema_rut(malo), malo
+    assert problema_rut(float("nan")) == "RUT vacío"
+
+
+# La grilla filtra por "contiene": se busca 1234567-8 y puede aparecer
+# 11234567-8. Solo cuenta como encontrado si hay una celda exacta y ninguna
+# otra que lo contenga.
+def test_interpretar_conteo_rut():
+    assert interpretar_conteo_rut("1234567-8", 0, 0) is False
+    assert interpretar_conteo_rut("1234567-8", 1, 1) is True
+    assert interpretar_conteo_rut("1234567-8", 2, 2) is True
+    for exactas, parciales in ((0, 1), (1, 2)):
+        try:
+            interpretar_conteo_rut("1234567-8", exactas, parciales)
+        except RutAmbiguoEnGrilla:
+            pass
+        else:
+            raise AssertionError(f"no avisó ambigüedad con {exactas}/{parciales}")
 
 
 def test_carpeta_sugerida():
@@ -216,6 +298,16 @@ def test_tipo_desde_nombre_archivo():
     # Lo que no calza con nada se omite, no se inventa un tipo.
     for archivo in ("foto vacaciones.jpg", "EPP.pdf", "scan0001.pdf", "Girl.pdf"):
         assert tipo_desde_nombre_archivo(archivo) is None, archivo
+
+
+# En modo prueba el borrado queda como "se BORRARÍAN" y el aviso de la prueba
+# del botón no cuenta como documento.
+def test_notas_limpieza_simulada():
+    from crear_o_editar import _notas_documentos
+    docs = {"sin_rut": False, "tipos": None, "subida": None,
+            "limpieza": ("simulado", ["Doc A", "Doc B", "[prueba de borrado OK: ...]"])}
+    notas, _ = _notas_documentos(docs, [])
+    assert notas[0].startswith("Docs que se BORRARÍAN (modo prueba, no se borró nada) (2):")
 
 
 # Si un nombre calza igual de bien con dos tipos distintos, no se adivina: se
