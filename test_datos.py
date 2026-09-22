@@ -30,7 +30,9 @@ from crear_o_editar import (
     autocompletar_campos_negocio,
     formatear_fecha,
 )
-from documentos import _norm, preparar_items_carpeta, tipo_desde_nombre_archivo
+from documentos import (_norm, _palabras_alternativa, clasificar_nombre_archivo,
+                        preparar_items_carpeta, tipo_desde_nombre_archivo)
+from tipos_documento import REGLAS_TIPO_DOCUMENTO
 
 
 # La planilla trae el sexo abreviado y el sitio lo pide completo.
@@ -197,12 +199,41 @@ def test_tipo_desde_nombre_archivo():
         "CONTRATO_TRABAJO ADAN LEON.pdf": "Contrato de Trabajo",
         "Anexo contrato trabajo.pdf": "Anexos de Contrato",
         "Finiquito de Trabajo.docx": "Finiquito de Trabajo",
+        # Variantes con "de" de más o de menos, en otro orden o en plural.
+        "Contrato de puesta a disposición.pdf": "Contrato puesta a disposición",
+        "Capacitacion uso de EPP.pdf": "Registro de Capacitación Uso EPP",
+        "Contacto emergencia.pdf": "Contacto en caso de Emergencia",
+        "Reglamento interno.pdf": "TC Reglamento Interno RIOHS mandante",
+        "Copia de contrato trabajo (1).pdf": "Contrato de Trabajo",
+        "Liquidaciones agosto.pdf": "Liquidaciones de Sueldo",
+        "Anexo contrato personal EST.pdf": "Anexos de contrato personal EST",
+        "Ex-ODI.pdf": "Registro de Capacitación IRL (Ex Odi) Mandante",
+        "Carnet.PDF": "Cédula de Identidad",
     }
     for archivo, esperado in casos.items():
         assert tipo_desde_nombre_archivo(archivo) == esperado, archivo
 
     # Lo que no calza con nada se omite, no se inventa un tipo.
-    assert tipo_desde_nombre_archivo("foto vacaciones.jpg") is None
+    for archivo in ("foto vacaciones.jpg", "EPP.pdf", "scan0001.pdf", "Girl.pdf"):
+        assert tipo_desde_nombre_archivo(archivo) is None, archivo
+
+
+# Si un nombre calza igual de bien con dos tipos distintos, no se adivina: se
+# omite y el motivo lo dice.
+def test_clasificar_nombre_ambiguo():
+    tipo, motivo = clasificar_nombre_archivo("Contrato trabajo y entrega EPP.pdf")
+    assert tipo is None
+    assert "ambiguo" in motivo and "Contrato de Trabajo" in motivo and "Registro Entrega EPP" in motivo
+
+
+# La tabla de tipos_documento.py se edita a mano: cada tipo una sola vez y
+# ninguna alternativa que quede vacía al quitarle las palabras de relleno.
+def test_tabla_tipos_documento():
+    tipos = [t for t, _ in REGLAS_TIPO_DOCUMENTO]
+    assert len(tipos) == len(set(tipos)), "hay un tipo repetido en tipos_documento.py"
+    for tipo, alternativas in REGLAS_TIPO_DOCUMENTO:
+        for alt in alternativas:
+            assert _palabras_alternativa(alt), f"alternativa vacía en {tipo!r}: {alt!r}"
 
 
 # "Adan_Leon" tiene que calzar con "ADAN IGNACIO LEON BRAVO".

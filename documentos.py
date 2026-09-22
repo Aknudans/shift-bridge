@@ -9,6 +9,7 @@ from shift_common import (
     seleccionar_grupo_proveedor,
     buscar_rut,
 )
+from tipos_documento import PALABRAS_RELLENO, REGLAS_TIPO_DOCUMENTO
 
 SEL_LINK_RUT = 'a[id*="link_Codigo_0"]'          # el RUT de la fila, que es el enlace a sus documentos
 SEL_FILA_DOC = "tr.dxgvDataRow"
@@ -275,25 +276,9 @@ import unicodedata
 EXTENSIONES_OK = (".pdf", ".docx", ".xlsx", ".jpg", ".jpeg", ".png")
 
 # Los tipos de documento que ofrece el sitio, escritos igual que allá pero sin
-# el prefijo del catálogo adelante.
-CATALOGO_TIPOS_DOCUMENTO = [
-    "Anexos de Contrato",
-    "Anexos",
-    "Liquidaciones de Sueldo",
-    "Registro de Capacitación IRL (Ex Odi) Mandante",
-    "TC Reglamento Interno RIOHS mandante",
-    "Registro Entrega EPP",
-    "Registro de Capacitación Uso EPP",
-    "Contrato de Trabajo",
-    "Cédula de Identidad",
-    "Finiquito de Trabajo",
-    "Contrato puesta a disposición",
-    "Visa de trabajo o ATT",
-    "Contacto en caso de Emergencia",
-    "Toma de conocimiento marca en biometrico (EST)",
-    "Anexos de contrato personal EST",
-    "Comprobante de Entrevista del personal EST y OUT",
-]
+# el prefijo del catálogo adelante. Salen de la tabla de tipos_documento.py,
+# que es donde se agregan tipos y palabras clave.
+CATALOGO_TIPOS_DOCUMENTO = [tipo for tipo, _ in REGLAS_TIPO_DOCUMENTO]
 
 # Los ocho documentos que trae normalmente la carpeta de un ingreso nuevo. Si
 # falta alguno no se frena nada, solo queda avisado en el reporte.
@@ -325,51 +310,53 @@ def _norm(s: str) -> str:
     return " ".join(s.upper().split())
 
 
-# Los archivos que entrega la gente no se llaman como el tipo del catálogo:
-# usan abreviaturas y otra redacción. Esta tabla traduce lo uno en lo otro
-# buscando pedazos del nombre. Se revisa en orden y gana el primero que calce,
-# así que conviene dejar arriba los casos más específicos. Cuando aparezcan
-# nombres nuevos que no calcen con nada, se agregan acá.
-import re as _re
+# Palabras de una alternativa de tipos_documento.py, ya normalizadas y sin
+# las de relleno ("CONTACTO DE EMERGENCIA" queda como {CONTACTO, EMERGENCIA}).
+def _palabras_alternativa(alternativa: str) -> frozenset:
+    return frozenset(p for p in _norm(alternativa).split() if p not in PALABRAS_RELLENO)
 
-_MAPEO_NOMBRE_TIPO = [
-    (_re.compile(r"\bRIOHS\b"),                     "TC Reglamento Interno RIOHS mandante"),
-    (_re.compile(r"\bIRL\b|EX ?ODI"),               "Registro de Capacitación IRL (Ex Odi) Mandante"),
-    (_re.compile(r"CONTACTO (DE|EN CASO)"),         "Contacto en caso de Emergencia"),
-    (_re.compile(r"MARCAJE BIOMETRICO|MARCA EN BIOMETRICO|TOMA DE CONOCIMIENTO MARCA"),
-     "Toma de conocimiento marca en biometrico (EST)"),
-    (_re.compile(r"ENTREGA .*EPP|EPP .*ENTREGA"),   "Registro Entrega EPP"),
-    (_re.compile(r"USO EPP"),                       "Registro de Capacitación Uso EPP"),
-    (_re.compile(r"^C\s*I\b|CEDULA|CARNET"),        "Cédula de Identidad"),
-    # Los anexos van antes que los contratos: "Anexo contrato trabajo" es un
-    # anexo, no el contrato.
-    (_re.compile(r"ANEXO.*PERSONAL EST"),           "Anexos de contrato personal EST"),
-    (_re.compile(r"ANEXOS? (DE )?CONTRATO"),        "Anexos de Contrato"),
-    (_re.compile(r"^CD\b|CONTRATO PUESTA A DISPOSICION|CONTRATO DE DISPOSICION|\bCPD\b"),
-     "Contrato puesta a disposición"),
-    # Los archivos llegan como "Contrato Trabajo" a secas, sin el "de". En el
-    # sitio se elige "LOGISTICA FALABELLA/Contrato de Trabajo".
-    (_re.compile(r"CONTRATO (DE )?TRABAJO"),        "Contrato de Trabajo"),
-    (_re.compile(r"FINIQUITO"),                     "Finiquito de Trabajo"),
-    (_re.compile(r"\bVISA\b|\bATT\b"),              "Visa de trabajo o ATT"),
-    (_re.compile(r"COMPROBANTE.*ENTREVISTA"),       "Comprobante de Entrevista del personal EST y OUT"),
-    (_re.compile(r"LIQUIDACION"),                   "Liquidaciones de Sueldo"),
+
+_REGLAS_NORMALIZADAS = [
+    (tipo, [a for a in (_palabras_alternativa(x) for x in alternativas) if a])
+    for tipo, alternativas in REGLAS_TIPO_DOCUMENTO
 ]
 
 
-# Adivina qué tipo de documento es un archivo por su nombre: primero busca que
-# se llame igual que un tipo del catálogo y, si no, prueba con la tabla de
-# equivalencias. Si no calza con nada, devuelve None y el archivo se omite.
-def tipo_desde_nombre_archivo(nombre_archivo: str) -> Optional[str]:
+# Una palabra clave está en el nombre si aparece tal cual o en plural simple
+# (ANEXO -> ANEXOS, LIQUIDACION -> LIQUIDACIONES).
+def _contiene_palabra(palabras_nombre: set, clave: str) -> bool:
+    return (clave in palabras_nombre or clave + "S" in palabras_nombre
+            or clave + "ES" in palabras_nombre)
+
+
+# Adivina qué tipo de documento es un archivo por su nombre, con las palabras
+# clave de tipos_documento.py. Devuelve (tipo, motivo): el tipo, o None y el
+# motivo por el que no se pudo decidir. Si calza con varios tipos, gana la
+# alternativa con más palabras; si empatan tipos distintos, no se adivina.
+def clasificar_nombre_archivo(nombre_archivo: str):
     stem = os.path.splitext(os.path.basename(nombre_archivo))[0]
     objetivo = _norm(stem)
     for tipo in CATALOGO_TIPOS_DOCUMENTO:
         if _norm(tipo) == objetivo:
-            return tipo
-    for rx, tipo in _MAPEO_NOMBRE_TIPO:
-        if rx.search(objetivo):
-            return tipo
-    return None
+            return tipo, ""
+
+    palabras_nombre = set(objetivo.split())
+    puntaje = {}
+    for tipo, alternativas in _REGLAS_NORMALIZADAS:
+        for alt in alternativas:
+            if all(_contiene_palabra(palabras_nombre, c) for c in alt):
+                puntaje[tipo] = max(puntaje.get(tipo, 0), len(alt))
+    if not puntaje:
+        return None, "el nombre no calza con ningún tipo del catálogo"
+    mejor = max(puntaje.values())
+    ganadores = [t for t, n in puntaje.items() if n == mejor]
+    if len(ganadores) > 1:
+        return None, "tipo ambiguo: calza con " + " / ".join(ganadores)
+    return ganadores[0], ""
+
+
+def tipo_desde_nombre_archivo(nombre_archivo: str) -> Optional[str]:
+    return clasificar_nombre_archivo(nombre_archivo)[0]
 
 
 # Revisa la carpeta de una persona y arma la lista de lo que se le va a subir.
@@ -390,9 +377,9 @@ def preparar_items_carpeta(carpeta_persona: str):
         if ext not in EXTENSIONES_OK:
             omitidos.append(f"{nombre} (extensión no aceptada)")
             continue
-        tipo = tipo_desde_nombre_archivo(nombre)
+        tipo, motivo = clasificar_nombre_archivo(nombre)
         if not tipo:
-            omitidos.append(f"{nombre} (el nombre no calza con ningún tipo del catálogo)")
+            omitidos.append(f"{nombre} ({motivo})")
             continue
         items.append({"ruta": ruta, "nombre": os.path.splitext(nombre)[0], "tipo": tipo})
     return items, omitidos
