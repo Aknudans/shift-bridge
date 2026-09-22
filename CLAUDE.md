@@ -429,6 +429,12 @@ que se indica aquí.
    `LOGISTICA FALABELLA/Contrato de Trabajo`.
 4. **Probar el `.exe` con un modo real** (crear/editar y/o subir documentos)
    con sesión iniciada. Solo se validó que llega a conectar a Chrome.
+   El 22/09/2026, corriéndolo a mano desde una terminal, aparecieron dos
+   errores que mataban la corrida **después** de hacer el trabajo
+   (`OSError: [Errno 22]` al imprimir y `EOFError` en la confirmación del
+   chequeo previo): ya están corregidos y documentados en
+   `.claude/rules/interfaz-empaquetado.md`, pero falta volver a probar el
+   `.exe` reconstruido.
 5. **Guardado real de identidades bloqueadas** (`22708167-8`, `11847694-8`,
    11.5): validado con `--no-guardar`, falta confirmar con Guardar real. Si
    AFP / Sistema de Salud quedan en su default ("Uno" / "Sin Información"),

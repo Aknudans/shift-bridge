@@ -4,6 +4,9 @@
 # Excepcion: SHIFT.xlsx se versiona SOLO como template (encabezados, sin datos).
 # ⚠️ NUNCA commitear SHIFT.xlsx con filas de personas reales.
 !SHIFT.xlsx
+# Excepcion: la planilla de ejemplo que se entrega con el .exe. Solo tiene una
+# fila ficticia; construir_exe.bat la copia a dist\ShiftLaboralBot\.
+!SHIFT_ejemplo.xlsx
 
 # Capturas de depuracion (pueden mostrar datos de pantalla)
 debug_*.png

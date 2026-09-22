@@ -21,6 +21,21 @@ if errorlevel 1 (
 
 python -m PyInstaller ShiftLaboralBot.spec --distpath dist --workpath build --noconfirm
 
+rem PyInstaller borra dist\ShiftLaboralBot\ antes de recrearla, asi que estos
+rem dos archivos de la entrega hay que volver a copiarlos en cada build. Se
+rem perdieron una vez por no hacerlo (22/09/2026): vivian solo ahi y dist\
+rem esta en .gitignore.
+echo.
+echo Copiando los archivos que acompanan al ejecutable...
+for %%A in (GUIA_EJECUCION.txt SHIFT_ejemplo.xlsx) do (
+    if exist "%%A" (
+        copy /y "%%A" "dist\ShiftLaboralBot\" >nul
+        echo   - %%A
+    ) else (
+        echo   ADVERTENCIA: falta %%A en la carpeta del proyecto; no se copio.
+    )
+)
+
 echo.
 if exist "dist\ShiftLaboralBot\ShiftLaboralBot.exe" (
     echo ============================================================

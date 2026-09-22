@@ -898,9 +898,16 @@ def main(argv=None):
         return 0
     # Solo se pregunta si hay alguien escribiendo en una consola: desde la
     # interfaz (sin consola) se pregunta allá, antes de lanzar esta corrida.
+    # El ejecutable se construye sin consola y, llamado a mano desde una
+    # terminal, isatty() dice que sí la hay pero después leer da EOF: sin el
+    # try, la corrida moría ahí en vez de seguir.
     if con_problemas and sys.stdin is not None and sys.stdin.isatty():
-        respuesta = input(f"El chequeo previo encontró {con_problemas} persona(s) con problemas. "
-                          "¿Continuar de todos modos? (s/N): ").strip().lower()
+        try:
+            respuesta = input(f"El chequeo previo encontró {con_problemas} persona(s) con problemas. "
+                              "¿Continuar de todos modos? (s/N): ").strip().lower()
+        except (EOFError, OSError):
+            print("No se pudo preguntar por consola; se continúa con la corrida.")
+            respuesta = "s"
         if respuesta not in ("s", "si", "sí"):
             print("Ejecución cancelada: no se abrió el sitio ni se modificó nada.")
             return 0

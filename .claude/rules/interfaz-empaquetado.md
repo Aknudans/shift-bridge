@@ -52,6 +52,22 @@ paths:
 - Sin consola: `.exe` compilado con `console=False` y subproceso con
   `creationflags=subprocess.CREATE_NO_WINDOW`. Playwright ya soporta
   `sys.frozen` y oculta la consola de su driver.
+- 🔴 **Ejecutar el `.exe` a mano desde una terminal** (22/09/2026): con
+  `console=False`, Windows deja `stdout` y `stdin` inservibles, y el modo
+  consola moría **después** de hacer todo el trabajo. Dos blindajes:
+  - `app_entry._SalidaTolerante` envuelve `sys.stdout`/`sys.stderr` en
+    `_forzar_salida_por_linea`: descarta el error al escribir (antes, cada
+    `print` daba `OSError: [Errno 22] Invalid argument`) y cubre el caso
+    `stdout is None`. Delega el resto (`reconfigure`, `encoding`, `isatty`)
+    al stream original, así que el `reconfigure` de `crear_o_editar.py`
+    sigue funcionando.
+  - La confirmación del chequeo previo (`crear_o_editar.main`) va dentro de
+    un `try/except (EOFError, OSError)`: `isatty()` responde `True` pero
+    leer da EOF (`EOFError: EOF when reading a line`). Si no se puede
+    preguntar, avisa y continúa, igual que cuando la interfaz lanza el
+    subproceso con `stdin=DEVNULL`.
+  - Lanzado desde la interfaz, que pasa una tubería válida, nada de esto
+    cambia.
 - `ShiftLaboralBot.spec` calcula en tiempo de build la ruta de
   `playwright/driver` (se agrega con `--add-data`, PyInstaller no la detecta)
   e incluye `collect_data_files('customtkinter')`.
@@ -63,3 +79,11 @@ paths:
   sacarlo de ahí. `upx=False`.
 - Cerrar el programa antes de construir (`construir_exe.bat` usa
   `--noconfirm`).
+- 🔴 **Archivos que acompañan al `.exe`** (22/09/2026): PyInstaller **borra**
+  `dist\ShiftLaboralBot\` antes de recrearla, y `GUIA_EJECUCION.txt` y
+  `SHIFT_ejemplo.xlsx` no están en el `.spec`. Se perdieron una vez por eso:
+  `SHIFT_ejemplo.xlsx` vivía solo ahí y `dist/` está en `.gitignore`. Ahora
+  vive en la raíz del proyecto (excepción `!SHIFT_ejemplo.xlsx`; una sola
+  fila ficticia, sin datos reales) y `construir_exe.bat` copia los dos a
+  `dist\ShiftLaboralBot\` después de construir, avisando si alguno falta.
+  Al agregar otro archivo a la entrega, sumarlo a ese `for` del `.bat`.
