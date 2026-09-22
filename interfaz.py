@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter.filedialog as filedialog
 import tkinter.messagebox as messagebox
 
@@ -133,6 +134,17 @@ AYUDA = [
         "Si el archivo del reporte está abierto en Excel, se guarda con otro nombre "
         "en vez de perderse.",
     ]),
+    ("El log", [
+        "Al iniciar, el log se amplía solo y ocupa casi toda la ventana. Con "
+        "«Mostrar opciones» se vuelven a ver los pasos 1 a 3; con «Ampliar log» se "
+        "ocultan de nuevo.",
+        "Con la barra de la derecha se puede subir a leer lo anterior mientras el "
+        "bot trabaja: la vista solo sigue a las líneas nuevas si está abajo del todo.",
+        "«Descargar log (.txt)» guarda todo lo que muestra el log. Si el proceso "
+        "termina con errores o se cancela, se ofrece guardarlo automáticamente.",
+        "⚠ Al cancelar no se genera el reporte: el log guardado es el único registro "
+        "de lo que se alcanzó a hacer.",
+    ]),
     ("Si algo falla", [
         "«No se pudo conectar a Chrome»: la ventana de depuración se cerró o nunca "
         "se abrió. Apretar de nuevo «Abrir Chrome de depuración» y no cerrar esa "
@@ -173,7 +185,10 @@ class InterfazBot(ctk.CTk):
         super().__init__()
 
         self.title("Bot ShiftLaboral")
-        self.geometry("880x760")
+        # Tan alta como permita la pantalla (hasta 1000 px), para que el log
+        # tenga espacio; en pantallas chicas se puede usar "Ampliar log".
+        alto = min(max(self.winfo_screenheight() - 80, 620), 1000)
+        self.geometry(f"940x{alto}")
         self.minsize(760, 620)
         try:
             self.iconbitmap(_ruta_icono())
@@ -185,6 +200,9 @@ class InterfazBot(ctk.CTk):
         self.total_filas = None
         self.cancelado_por_usuario = False
         self.ventana_ayuda = None
+        self.hubo_errores = False   # alguna línea del log con ERROR o Traceback
+        self.log_ampliado = False
+        self.nombre_corrida = "log"
 
         self._construir_widgets()
         self._actualizar_visibilidad_modo()
@@ -320,12 +338,31 @@ class InterfazBot(ctk.CTk):
         self.barra_progreso.set(0)
         self.barra_progreso.pack(fill="x", **pad)
 
-        # Todo lo que el bot va contando mientras trabaja.
-        ctk.CTkLabel(self, text="Log en vivo:", font=ctk.CTkFont(weight="bold")).pack(
-            anchor="w", padx=14
+        # Los pasos 1 a 3 y las opciones: se pueden ocultar con "Ampliar log"
+        # para que el log ocupe casi toda la ventana.
+        self.marcos_configuracion = [marco_chrome, marco_modo, marco_archivos, marco_opciones]
+        self.marco_accion = marco_accion
+
+        # Todo lo que el bot va contando mientras trabaja, con los botones para
+        # ampliarlo y guardarlo en un .txt.
+        marco_log = ctk.CTkFrame(self, fg_color="transparent")
+        marco_log.pack(fill="x", padx=14)
+        ctk.CTkLabel(marco_log, text="Log en vivo:", font=ctk.CTkFont(weight="bold")).pack(
+            side="left"
         )
-        self.texto_log = ctk.CTkTextbox(self, font=ctk.CTkFont(family="Consolas", size=12))
-        self.texto_log.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        ctk.CTkButton(
+            marco_log, text="Descargar log (.txt)", width=150, command=self._descargar_log,
+        ).pack(side="right")
+        self.boton_ampliar_log = ctk.CTkButton(
+            marco_log, text="Ampliar log", width=130, command=self._alternar_log_ampliado,
+        )
+        self.boton_ampliar_log.pack(side="right", padx=8)
+
+        self.texto_log = ctk.CTkTextbox(
+            self, font=ctk.CTkFont(family="Consolas", size=12), height=320, wrap="none",
+            activate_scrollbars=True,
+        )
+        self.texto_log.pack(fill="both", expand=True, padx=14, pady=(4, 14))
         self.texto_log.configure(state="disabled")
 
     # Las instrucciones, en una ventana aparte que se puede dejar abierta al
@@ -577,9 +614,15 @@ class InterfazBot(ctk.CTk):
     def _lanzar(self, comando: list[str], texto_boton: str):
         self.total_filas = None
         self.cancelado_por_usuario = False
+        self.hubo_errores = False
+        self.nombre_corrida = f"log_{self.modo.get()}"
         self.barra_progreso.set(0)
         self.label_progreso.configure(text="")
         self._limpiar_log()
+        # Mientras corre, lo que importa es el log: se amplía solo. Con
+        # "Mostrar opciones" se vuelve a la vista completa.
+        if not self.log_ampliado:
+            self._alternar_log_ampliado()
         self._log("Ejecutando: " + " ".join(comando))
         self.boton_iniciar.configure(state="disabled", text=texto_boton)
         self.boton_revisar.configure(state="disabled")
@@ -674,6 +717,8 @@ class InterfazBot(ctk.CTk):
 
     def _procesar_linea(self, linea: str):
         self._log(linea)
+        if "ERROR" in linea or "Traceback" in linea:
+            self.hubo_errores = True
 
         m = RE_PROGRESO.match(linea)
         if m:
@@ -694,25 +739,86 @@ class InterfazBot(ctk.CTk):
             self._log("\n=== Proceso CANCELADO por el usuario. El reporte final no se generó — "
                       "revisar el log de arriba y el estado de ShiftLaboral manualmente. ===")
             self.cancelado_por_usuario = False
+            # Al cancelar no hay reporte: el log es el único registro de lo hecho.
+            if messagebox.askyesno(
+                "Proceso cancelado",
+                "El reporte final no se generó. El log es el único registro de lo que "
+                "se alcanzó a procesar.\n\n¿Guardar el log en un archivo .txt?",
+                icon="warning",
+            ):
+                self._descargar_log()
             return
         if self.total_filas:
             self.barra_progreso.set(1)
-        if codigo == "0":
+        if codigo == "0" and not self.hubo_errores:
             self._log("\n=== Terminado correctamente. ===")
+            return
+        if codigo == "0":
+            self._log("\n=== Terminado, pero hubo filas con ERROR. Revisar el log arriba. ===")
+            titulo = "Terminó con filas en error"
+            mensaje = "El proceso terminó, pero algunas filas quedaron en ERROR."
         else:
             self._log(f"\n=== Terminó con errores (código {codigo}). Revisar el log arriba. ===")
-            messagebox.showwarning(
-                "Terminó con errores",
-                "El proceso terminó con errores. Revisar el log en la ventana principal.",
-            )
+            titulo = "Terminó con errores"
+            mensaje = "El proceso terminó con errores."
+        if messagebox.askyesno(
+            titulo,
+            mensaje + " El detalle está en el log de la ventana principal.\n\n"
+            "¿Guardar el log en un archivo .txt (por ejemplo, para enviarlo a soporte)?",
+            icon="warning",
+        ):
+            self._descargar_log()
 
     # Escribir y limpiar el recuadro del log.
 
+    # Solo baja al final si la vista ya estaba abajo: así se puede subir con la
+    # barra a leer líneas anteriores sin que cada línea nueva la devuelva abajo.
     def _log(self, texto: str):
+        estaba_abajo = self.texto_log.yview()[1] >= 0.999
         self.texto_log.configure(state="normal")
         self.texto_log.insert("end", texto + "\n")
-        self.texto_log.see("end")
+        if estaba_abajo:
+            self.texto_log.see("end")
         self.texto_log.configure(state="disabled")
+
+    # Guarda todo el contenido del log en un .txt elegido por la persona.
+    # Devuelve True si se guardó.
+    def _descargar_log(self) -> bool:
+        contenido = self.texto_log.get("1.0", "end").rstrip()
+        if not contenido:
+            messagebox.showinfo("Descargar log", "El log está vacío: todavía no hay nada que guardar.")
+            return False
+        sugerido = f"{self.nombre_corrida}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        ruta = filedialog.asksaveasfilename(
+            title="Guardar el log como",
+            initialdir=BASE_DIR,
+            initialfile=sugerido,
+            defaultextension=".txt",
+            filetypes=[("Texto", "*.txt")],
+        )
+        if not ruta:
+            return False
+        try:
+            with open(ruta, "w", encoding="utf-8") as f:
+                f.write(contenido + "\n")
+        except Exception as e:
+            messagebox.showerror("Descargar log", f"No se pudo guardar el log:\n{e}")
+            return False
+        messagebox.showinfo("Descargar log", f"Log guardado en:\n{ruta}")
+        return True
+
+    # Oculta o vuelve a mostrar los pasos 1 a 3 y las opciones, para que el
+    # log use casi toda la ventana. Los botones y la barra de avance quedan.
+    def _alternar_log_ampliado(self):
+        if self.log_ampliado:
+            for marco in self.marcos_configuracion:
+                marco.pack(fill="x", padx=14, pady=8, before=self.marco_accion)
+            self.boton_ampliar_log.configure(text="Ampliar log")
+        else:
+            for marco in self.marcos_configuracion:
+                marco.pack_forget()
+            self.boton_ampliar_log.configure(text="Mostrar opciones")
+        self.log_ampliado = not self.log_ampliado
 
     def _limpiar_log(self):
         self.texto_log.configure(state="normal")
