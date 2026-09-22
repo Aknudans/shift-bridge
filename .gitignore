@@ -25,4 +25,6 @@ build/
 dist/
 
 # Configuracion local de Claude Code (especifica de esta maquina)
-.claude/
+.claude/*
+# Las reglas de carga diferida para Claude Code sí se versionan
+!.claude/rules/
